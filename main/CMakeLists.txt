@@ -1,0 +1,26 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "app_config.c"
+        "app_status.c"
+        "wifi_manager.c"
+        "sensor_sht31.c"
+        "sensor_task.c"
+        "auth_oidc.c"
+        "api_server.c"
+        "json_util.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        wifi_provisioning
+        protocomm
+        esp_http_server
+        esp_http_client
+        esp-tls
+        mbedtls
+        json
+        driver
+)
