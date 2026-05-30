@@ -15,4 +15,5 @@ typedef enum {
 
 esp_err_t auth_oidc_start(const app_config_t *config);
 auth_result_t auth_oidc_validate_authorization_header(const char *header);
+auth_result_t auth_oidc_validate_claims_json(const char *claims_json);
 void auth_oidc_set_config_for_test(const app_config_t *config);

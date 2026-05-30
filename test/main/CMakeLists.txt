@@ -3,6 +3,10 @@ idf_component_register(
         "test_app_main.c"
         "../test_sensor_sht31.c"
         "../test_sensor_task.c"
+        "../test_auth_claims.c"
+        "../../main/app_config.c"
+        "../../main/app_status.c"
+        "../../main/auth_oidc.c"
         "../../main/sensor_sht31.c"
         "../../main/sensor_task.c"
     INCLUDE_DIRS
@@ -12,4 +16,9 @@ idf_component_register(
         unity
         driver
         esp_timer
+        esp_http_client
+        esp-tls
+        mbedtls
+        json
+        nvs_flash
 )

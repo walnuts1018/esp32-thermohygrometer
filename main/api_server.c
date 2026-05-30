@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#include "auth_oidc.h"
 #include "app_status.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
@@ -59,6 +60,21 @@ static esp_err_t healthz_handler(httpd_req_t *req)
 
 static esp_err_t latest_handler(httpd_req_t *req)
 {
+    char auth_header[1024] = {0};
+    esp_err_t hdr_err = httpd_req_get_hdr_value_str(req, "Authorization", auth_header,
+                                                    sizeof(auth_header));
+    auth_result_t auth =
+        auth_oidc_validate_authorization_header(hdr_err == ESP_OK ? auth_header : NULL);
+    if (auth == AUTH_RESULT_MISSING || auth == AUTH_RESULT_INVALID) {
+        return json_send_error(req, 401, "unauthorized", "missing or invalid bearer token");
+    }
+    if (auth == AUTH_RESULT_FORBIDDEN) {
+        return json_send_error(req, 403, "forbidden", "token lacks required audience or role");
+    }
+    if (auth == AUTH_RESULT_NOT_READY) {
+        return json_send_error(req, 503, "auth_not_ready", "auth metadata is not ready");
+    }
+
     sensor_latest_reading_t latest = {0};
     esp_err_t err = sensor_latest_get(&latest);
     if (err != ESP_OK) {
