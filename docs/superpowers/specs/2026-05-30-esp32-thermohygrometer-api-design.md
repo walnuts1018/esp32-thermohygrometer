@@ -27,6 +27,20 @@ Reasons:
 - Better fit for JWT/JWKS verification than Arduino-style stacks.
 - More predictable memory and task control for an always-on network service.
 
+TLS trust:
+
+- Enable ESP-IDF `esp_crt_bundle` and use the Mozilla CA certificate bundle for HTTPS server verification.
+- All `esp_http_client` calls to the OIDC discovery endpoint and JWKS endpoint must set `crt_bundle_attach = esp_crt_bundle_attach`.
+- Do not disable certificate verification for ZITADEL traffic.
+- If flash size becomes too constrained, the fallback is to embed the root CA needed for `auth.walnuts.dev` as PEM and use certificate pinning at the trust-anchor level. The default design remains the ESP-IDF certificate bundle because it handles normal CA rotation better.
+
+Task stack sizing:
+
+- Avoid running TLS, JWKS JSON parsing, or RSA/ECDSA/EdDSA signature verification on tiny default stacks.
+- Configure the HTTP server task stack to at least 8192 bytes; prefer 12288 bytes if memory allows.
+- Run OIDC discovery and JWKS refresh in a dedicated task with at least 12288 bytes of stack.
+- Keep large JSON buffers, JWT buffers, and parsed key material on the heap, not as large stack locals.
+
 ## Configuration Storage
 
 Use ESP-IDF NVS instead of EEPROM. ESP32 Arduino exposes EEPROM-like APIs, but in ESP-IDF NVS is the normal persistent key/value store and better matches this firmware.
@@ -59,32 +73,53 @@ On boot:
 
 Provisioning mode:
 
-- Start a temporary Wi-Fi access point, for example `thermohygrometer-setup`.
-- Run a local HTTP server.
-- Expose:
-  - `GET /setup`: returns current configuration status without secrets.
-  - `POST /setup/wifi`: accepts `ssid` and `password`, stores them in NVS, and restarts station connection.
-  - `POST /setup/auth`: optional endpoint for `issuer`, `audience`, and `role`.
-- Setup endpoints are only available in provisioning mode.
-- After successful Wi-Fi connection, stop provisioning endpoints.
+- Prefer ESP-IDF Wi-Fi Provisioning Manager (`wifi_provisioning`) instead of a hand-rolled setup server.
+- Initial transport: SoftAP provisioning, because it works without requiring BLE support in the client workflow.
+- Provisioning service name: `thermohygrometer-setup`.
+- Use provisioning security with proof-of-possession (PoP) rather than an open unauthenticated setup channel.
+- Use the provisioning manager's custom-data capability for optional auth settings such as `issuer`, `audience`, and `role` if needed.
+- After successful provisioning, store Wi-Fi credentials and custom settings in NVS and stop provisioning.
 
-For initial implementation, a JSON API is sufficient. A browser UI is not required.
+Fallback provisioning:
+
+- If the standard provisioning manager is impractical for the first implementation, use a temporary SoftAP plus JSON setup endpoints as an interim path.
+- The fallback setup endpoints must only run in provisioning mode and must not expose stored passwords.
+
+No browser UI is required for provisioning. Use the ESP-IDF provisioning protocol first; JSON setup endpoints are only the fallback path.
 
 ## Sensor Reading
 
-Use SHT31 single-shot measurement with high repeatability and clock stretching disabled:
+Use a decoupled sensor sampling task rather than reading the sensor from HTTP request handlers.
 
-- Command: `0x24 0x00`.
-- Wait for the measurement to complete.
-- Read 6 bytes:
-  - temperature MSB.
-  - temperature LSB.
-  - temperature CRC.
-  - humidity MSB.
-  - humidity LSB.
-  - humidity CRC.
+Sensor task:
 
-Validate both CRC bytes using the SHT3x CRC-8 algorithm before returning data.
+- Run a dedicated FreeRTOS task that owns all SHT31/I2C access.
+- Poll the SHT31 at a fixed interval, initially 2 seconds. This aligns with the sensor's temperature response time and avoids request-driven bursts.
+- Use single-shot measurement with high repeatability and clock stretching disabled:
+  - Command: `0x24 0x00`.
+  - Wait for the measurement to complete.
+  - Read 6 bytes:
+    - temperature MSB.
+    - temperature LSB.
+    - temperature CRC.
+    - humidity MSB.
+    - humidity LSB.
+    - humidity CRC.
+- Validate both CRC bytes using the SHT3x CRC-8 algorithm before publishing data.
+
+Shared latest reading:
+
+- Store the latest valid measurement in a small global structure:
+  - temperature.
+  - relative humidity.
+  - monotonic measurement timestamp.
+  - sensor status.
+  - last error code.
+- Protect the structure with a FreeRTOS mutex.
+- HTTP handlers never access I2C directly; they copy the latest reading under the mutex and release it before serializing JSON.
+- If no valid reading exists yet, protected measurement requests return `503 Service Unavailable`.
+
+This design avoids I2C contention and prevents repeated HTTP requests from causing overlapping SHT31 measurements or request-time NACK bursts.
 
 Conversion:
 
@@ -119,7 +154,8 @@ Authorization: caller must pass JWT validation and required role/scope checks.
 
 Behavior:
 
-- Trigger a fresh SHT31 measurement per request.
+- Return the most recent successful background measurement.
+- Do not communicate with the SHT31 from the HTTP handler.
 - Return JSON:
 
 ```json
@@ -147,14 +183,17 @@ OIDC metadata:
 - Fetch `https://auth.walnuts.dev/.well-known/openid-configuration` on boot unless `auth.issuer` is changed.
 - Require the returned `issuer` to match configured `auth.issuer`.
 - Read `jwks_uri`, expected to be `https://auth.walnuts.dev/oauth/v2/keys`.
+- Fetch over HTTPS using `esp_http_client` with `esp_crt_bundle_attach`.
 
 JWKS:
 
 - Fetch JWKS at boot after Wi-Fi is connected.
+- Fetch over HTTPS using `esp_http_client` with `esp_crt_bundle_attach`.
 - Cache keys in memory.
 - Store the last successful `jwks_uri` in NVS.
 - Refresh periodically based on cache headers when available, or at a conservative interval.
 - If a JWT uses an unknown `kid`, try one on-demand JWKS refresh before rejecting.
+- Perform refresh in the dedicated auth/JWKS task, not on the HTTP server task stack.
 
 JWT validation:
 
@@ -206,8 +245,9 @@ Suggested modules:
 
 - `main`: boot orchestration and task setup.
 - `config`: NVS-backed configuration.
-- `wifi`: station connection and provisioning AP mode.
+- `wifi`: station connection and ESP-IDF Wi-Fi Provisioning Manager integration.
 - `sensor_sht31`: I2C driver, CRC, conversion.
+- `sensor_task`: periodic sensor sampling and latest-reading mutex.
 - `auth_oidc`: discovery, JWKS cache, JWT validation.
 - `api_server`: HTTP routes and JSON responses.
 
@@ -217,6 +257,7 @@ Host-side unit tests:
 
 - SHT31 CRC validation.
 - Raw sensor conversion formulas.
+- Latest-reading store update and copy behavior.
 - JWT claim validation logic with fixed test claims.
 - ZITADEL role-claim extraction.
 - NVS config serialization logic where practical.
@@ -226,8 +267,10 @@ Target/hardware tests:
 - I2C scan or sensor read confirms address `0x45`.
 - `/healthz` works without auth.
 - `/v1/measurements/latest` rejects missing token.
+- Repeated or concurrent calls to `/v1/measurements/latest` do not trigger I2C errors because handlers only read cached measurements.
 - Valid token with correct audience and role succeeds.
 - Valid token with audience but missing role fails with `403`.
+- OIDC discovery and JWKS fetch succeed with certificate verification enabled.
 
 ## Open Inputs
 
