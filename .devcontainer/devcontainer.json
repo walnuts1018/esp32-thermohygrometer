@@ -16,5 +16,5 @@
             }
         }
     },
-    "postCreateCommand": "idf.py build"
+    "postCreateCommand": "bash -c '. /opt/esp/idf/export.sh && idf.py build'"
 }
