@@ -213,6 +213,19 @@ static bool json_string_array_contains(const cJSON *item, const char *expected)
     return false;
 }
 
+static void log_json_string_or_type(const char *name, const cJSON *item)
+{
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        ESP_LOGW(TAG, "claim %s=%s", name, item->valuestring);
+        return;
+    }
+    if (cJSON_IsArray(item)) {
+        ESP_LOGW(TAG, "claim %s is array with %d entries", name, cJSON_GetArraySize(item));
+        return;
+    }
+    ESP_LOGW(TAG, "claim %s is missing or has unsupported type", name);
+}
+
 static bool roles_claim_contains(const cJSON *root, const char *role)
 {
     /* ZITADEL の role claim は project 固有形式と global 形式の両方があり、どちらも role 名を key に持つ object。 */
@@ -260,6 +273,37 @@ static bool roles_claim_contains(const cJSON *root, const char *role)
     return false;
 }
 
+static void log_role_claim_names(const cJSON *root)
+{
+    static const char roles_prefix[] = "urn:zitadel:iam:org:project:";
+    static const char roles_suffix[] = ":roles";
+    static const char global_roles[] = "urn:zitadel:iam:org:project:roles";
+
+    const cJSON *claim = NULL;
+    cJSON_ArrayForEach(claim, root)
+    {
+        const char *claim_name = claim->string;
+        if (claim_name == NULL) {
+            continue;
+        }
+
+        bool is_global = strcmp(claim_name, global_roles) == 0;
+        bool is_project_specific = false;
+        if (!is_global && strncmp(claim_name, roles_prefix, strlen(roles_prefix)) == 0) {
+            size_t claim_name_len = strlen(claim_name);
+            size_t suffix_len = strlen(roles_suffix);
+            is_project_specific =
+                claim_name_len > strlen(roles_prefix) + suffix_len &&
+                strcmp(claim_name + claim_name_len - suffix_len, roles_suffix) == 0;
+        }
+
+        if (is_global || is_project_specific) {
+            ESP_LOGW(TAG, "role claim present: %s object=%s",
+                     claim_name, cJSON_IsObject(claim) ? "yes" : "no");
+        }
+    }
+}
+
 static bool auth_numeric_time_in_future(const cJSON *item, time_t now, int skew_seconds)
 {
     return cJSON_IsNumber(item) && item->valuedouble > (double)now + (double)skew_seconds;
@@ -268,20 +312,24 @@ static bool auth_numeric_time_in_future(const cJSON *item, time_t now, int skew_
 auth_result_t auth_oidc_validate_claims_json(const char *claims_json)
 {
     if (claims_json == NULL) {
+        ESP_LOGW(TAG, "claims validation failed: payload is null");
         return AUTH_RESULT_INVALID;
     }
     if (!app_status_get().time_synced) {
+        ESP_LOGW(TAG, "claims validation blocked: time is not synchronized");
         return AUTH_RESULT_NOT_READY;
     }
 
     app_config_t config;
     if (auth_oidc_get_config_copy(&config) != ESP_OK) {
+        ESP_LOGW(TAG, "claims validation failed: config unavailable");
         return AUTH_RESULT_INVALID;
     }
 
     cJSON *root = auth_parse_json_strict(claims_json);
     if (root == NULL || !cJSON_IsObject(root)) {
         cJSON_Delete(root);
+        ESP_LOGW(TAG, "claims validation failed: payload JSON is invalid");
         return AUTH_RESULT_INVALID;
     }
 
@@ -297,22 +345,42 @@ auth_result_t auth_oidc_validate_claims_json(const char *claims_json)
 
     if (!cJSON_IsString(issuer) || issuer->valuestring == NULL ||
         strcmp(issuer->valuestring, config.issuer) != 0) {
+        ESP_LOGW(TAG, "claims validation failed: issuer mismatch expected=%s",
+                 config.issuer);
+        log_json_string_or_type("iss", issuer);
         result = AUTH_RESULT_INVALID;
     } else if (!json_string_array_contains(audience, config.audience)) {
+        ESP_LOGW(TAG, "claims validation failed: audience mismatch expected=%s",
+                 config.audience);
+        log_json_string_or_type("aud", audience);
         result = AUTH_RESULT_FORBIDDEN;
     } else if (!cJSON_IsNumber(expires) || expires->valuedouble <= (double)now) {
+        ESP_LOGW(TAG, "claims validation failed: token expired now=%lld exp=%lld",
+                 (long long)now,
+                 cJSON_IsNumber(expires) ? (long long)expires->valuedouble : -1);
         result = AUTH_RESULT_INVALID;
     } else if (not_before != NULL &&
                (!cJSON_IsNumber(not_before) ||
                 auth_numeric_time_in_future(not_before, now, AUTH_CLOCK_SKEW_SECONDS))) {
+        ESP_LOGW(TAG, "claims validation failed: nbf is invalid or in future now=%lld nbf=%lld",
+                 (long long)now,
+                 cJSON_IsNumber(not_before) ? (long long)not_before->valuedouble : -1);
         result = AUTH_RESULT_INVALID;
     } else if (issued_at != NULL &&
                (!cJSON_IsNumber(issued_at) ||
                 auth_numeric_time_in_future(issued_at, now, AUTH_CLOCK_SKEW_SECONDS))) {
+        ESP_LOGW(TAG, "claims validation failed: iat is invalid or in future now=%lld iat=%lld",
+                 (long long)now,
+                 cJSON_IsNumber(issued_at) ? (long long)issued_at->valuedouble : -1);
         result = AUTH_RESULT_INVALID;
     } else if (!roles_claim_contains(root, config.role)) {
+        ESP_LOGW(TAG, "claims validation failed: required role is missing role=%s",
+                 config.role);
+        log_role_claim_names(root);
         result = AUTH_RESULT_FORBIDDEN;
     } else {
+        ESP_LOGI(TAG, "claims validation succeeded audience=%s role=%s",
+                 config.audience, config.role);
         result = AUTH_RESULT_OK;
     }
 
@@ -450,12 +518,10 @@ static bool asn1_add_len(int *total, int written)
     return true;
 }
 
-static size_t build_rsa_spki_der(const unsigned char *n, size_t n_len,
-                                 const unsigned char *e, size_t e_len,
-                                 unsigned char *der_out, size_t der_out_len)
+static size_t build_rsa_public_key_der(const unsigned char *n, size_t n_len,
+                                       const unsigned char *e, size_t e_len,
+                                       unsigned char *der_out, size_t der_out_len)
 {
-    static const char rsa_oid[] = "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";
-
     unsigned char *p = der_out + der_out_len;
     unsigned char *start = der_out;
 
@@ -467,31 +533,16 @@ static size_t build_rsa_spki_der(const unsigned char *n, size_t n_len,
         return 0;
     }
 
-    int bit_string_len = 0;
-    if (p - start < 1) {
-        return 0;
-    }
-    *--p = 0x00;
-    bit_string_len = rsa_pub_len + 1;
-    if (!asn1_add_len(&bit_string_len, mbedtls_asn1_write_len(&p, start, (size_t)bit_string_len)) ||
-        !asn1_add_len(&bit_string_len, mbedtls_asn1_write_tag(&p, start, MBEDTLS_ASN1_BIT_STRING))) {
-        return 0;
-    }
-
-    int alg_id_len = mbedtls_asn1_write_algorithm_identifier(&p, start, rsa_oid, sizeof(rsa_oid) - 1, 0);
-    if (alg_id_len < 0) {
-        return 0;
-    }
-
-    int spki_len = bit_string_len + alg_id_len;
-    if (!asn1_add_len(&spki_len, mbedtls_asn1_write_len(&p, start, (size_t)spki_len)) ||
-        !asn1_add_len(&spki_len, mbedtls_asn1_write_tag(&p, start, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE))) {
-        return 0;
-    }
-
     size_t total = (size_t)((der_out + der_out_len) - p);
     memmove(der_out, p, total);
     return total;
+}
+
+size_t auth_oidc_build_rsa_public_key_der_for_test(const unsigned char *n, size_t n_len,
+                                                   const unsigned char *e, size_t e_len,
+                                                   unsigned char *der_out, size_t der_out_len)
+{
+    return build_rsa_public_key_der(n, n_len, e, e_len, der_out, der_out_len);
 }
 
 static bool auth_psa_crypto_init_once(void)
@@ -519,6 +570,7 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
                                            const cJSON *jwk)
 {
     if (signing_input == NULL || signature == NULL || signature_len == 0 || !cJSON_IsObject(jwk)) {
+        ESP_LOGW(TAG, "signature validation failed: invalid input");
         return AUTH_RESULT_INVALID;
     }
 
@@ -526,6 +578,7 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
     const cJSON *exponent = cJSON_GetObjectItemCaseSensitive(jwk, "e");
     if (!cJSON_IsString(modulus) || modulus->valuestring == NULL ||
         !cJSON_IsString(exponent) || exponent->valuestring == NULL) {
+        ESP_LOGW(TAG, "signature validation failed: JWK modulus or exponent missing");
         return AUTH_RESULT_INVALID;
     }
 
@@ -538,10 +591,12 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
     if (!base64url_decode_alloc(modulus->valuestring, &n_bytes, &n_len) ||
         !base64url_decode_alloc(exponent->valuestring, &e_bytes, &e_len) ||
         n_len == 0 || e_len == 0) {
+        ESP_LOGW(TAG, "signature validation failed: JWK n/e decode failed");
         goto cleanup_ne;
     }
 
     if (!auth_psa_crypto_init_once()) {
+        ESP_LOGW(TAG, "signature validation failed: PSA crypto init failed");
         goto cleanup_ne;
     }
 
@@ -549,18 +604,22 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
     const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     if (md_info == NULL ||
         mbedtls_md(md_info, (const unsigned char *)signing_input, strlen(signing_input), digest) != 0) {
+        ESP_LOGW(TAG, "signature validation failed: SHA-256 digest failed");
         goto cleanup_ne;
     }
 
     size_t der_buf_size = 32 + n_len + e_len;
     unsigned char *der_buf = malloc(der_buf_size);
     if (der_buf == NULL) {
+        ESP_LOGW(TAG, "signature validation failed: DER allocation failed");
         goto cleanup_ne;
     }
 
-    size_t der_len = build_rsa_spki_der(n_bytes, n_len, e_bytes, e_len, der_buf, der_buf_size);
+    size_t der_len = build_rsa_public_key_der(n_bytes, n_len, e_bytes, e_len, der_buf, der_buf_size);
     if (der_len == 0) {
         free(der_buf);
+        ESP_LOGW(TAG, "signature validation failed: RSA public key DER build failed n_len=%u e_len=%u",
+                 (unsigned)n_len, (unsigned)e_len);
         goto cleanup_ne;
     }
 
@@ -574,6 +633,7 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
     free(der_buf);
 
     if (psa_status != PSA_SUCCESS) {
+        ESP_LOGW(TAG, "signature validation failed: PSA import status=%d", (int)psa_status);
         goto cleanup_ne;
     }
 
@@ -584,6 +644,9 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
     psa_destroy_key(key_id);
 
     result = (psa_status == PSA_SUCCESS) ? AUTH_RESULT_OK : AUTH_RESULT_INVALID;
+    if (result != AUTH_RESULT_OK) {
+        ESP_LOGW(TAG, "signature validation failed: verify status=%d", (int)psa_status);
+    }
 
 cleanup_ne:
     free(n_bytes);
@@ -594,15 +657,18 @@ cleanup_ne:
 static auth_result_t verify_jwt_signature_and_claims(const char *jwt)
 {
     if (jwt == NULL) {
+        ESP_LOGW(TAG, "JWT validation failed: token is null");
         return AUTH_RESULT_INVALID;
     }
 
     const char *dot1 = strchr(jwt, '.');
     if (dot1 == NULL || dot1 == jwt) {
+        ESP_LOGW(TAG, "JWT validation failed: first segment missing len=%u", (unsigned)strlen(jwt));
         return AUTH_RESULT_INVALID;
     }
     const char *dot2 = strchr(dot1 + 1, '.');
     if (dot2 == NULL || dot2 == dot1 + 1 || dot2[1] == '\0' || strchr(dot2 + 1, '.') != NULL) {
+        ESP_LOGW(TAG, "JWT validation failed: invalid segment structure len=%u", (unsigned)strlen(jwt));
         return AUTH_RESULT_INVALID;
     }
 
@@ -620,8 +686,14 @@ static auth_result_t verify_jwt_signature_and_claims(const char *jwt)
         free(payload_segment);
         free(signature_segment);
         free(signing_input);
+        ESP_LOGW(TAG, "JWT validation failed: segment allocation failed");
         return AUTH_RESULT_INVALID;
     }
+
+    ESP_LOGI(TAG, "JWT segments: header=%u payload=%u signature=%u",
+             (unsigned)header_segment_len,
+             (unsigned)payload_segment_len,
+             (unsigned)strlen(signature_segment));
 
     unsigned char *header_json = NULL;
     unsigned char *payload_json = NULL;
@@ -637,44 +709,58 @@ static auth_result_t verify_jwt_signature_and_claims(const char *jwt)
     if (!base64url_decode_alloc(header_segment, &header_json, &header_json_len) ||
         !base64url_decode_alloc(payload_segment, &payload_json, &payload_json_len) ||
         !base64url_decode_alloc(signature_segment, &signature, &signature_len)) {
+        ESP_LOGW(TAG, "JWT validation failed: base64url decode failed");
         goto cleanup;
     }
     if (header_json_len == 0 || payload_json_len == 0 || signature_len == 0) {
+        ESP_LOGW(TAG, "JWT validation failed: decoded segment is empty");
         goto cleanup;
     }
 
     header_root = auth_parse_decoded_json_strict(header_json, header_json_len);
     if (header_root == NULL || !cJSON_IsObject(header_root)) {
+        ESP_LOGW(TAG, "JWT validation failed: header JSON invalid");
         goto cleanup;
     }
 
     const cJSON *alg = cJSON_GetObjectItemCaseSensitive(header_root, "alg");
     const cJSON *kid = cJSON_GetObjectItemCaseSensitive(header_root, "kid");
     const cJSON *typ = cJSON_GetObjectItemCaseSensitive(header_root, "typ");
+    ESP_LOGI(TAG, "JWT header: alg=%s kid=%s typ=%s",
+             cJSON_IsString(alg) && alg->valuestring != NULL ? alg->valuestring : "<invalid>",
+             cJSON_IsString(kid) && kid->valuestring != NULL ? kid->valuestring : "<invalid>",
+             cJSON_IsString(typ) && typ->valuestring != NULL ? typ->valuestring : "<missing>");
     if (!cJSON_IsString(alg) || alg->valuestring == NULL || strcmp(alg->valuestring, "RS256") != 0 ||
         !cJSON_IsString(kid) || kid->valuestring == NULL || kid->valuestring[0] == '\0' ||
         !jwt_header_typ_is_allowed(typ)) {
+        ESP_LOGW(TAG, "JWT validation failed: unsupported header");
         goto cleanup;
     }
 
     jwks_json = auth_oidc_copy_jwks_json_alloc();
     if (jwks_json == NULL) {
+        ESP_LOGW(TAG, "JWT validation failed: JWKS is unavailable");
         goto cleanup;
     }
 
     jwks_root = auth_parse_json_strict(jwks_json);
     if (jwks_root == NULL) {
+        ESP_LOGW(TAG, "JWT validation failed: JWKS JSON invalid");
         goto cleanup;
     }
 
     const cJSON *jwk = find_jwk_by_kid(jwks_root, kid->valuestring);
     if (jwk == NULL) {
+        ESP_LOGW(TAG, "JWT validation failed: kid not found in JWKS kid=%s", kid->valuestring);
         goto cleanup;
     }
 
     result = verify_rs256_with_jwk(signing_input, signature, signature_len, jwk);
     if (result == AUTH_RESULT_OK) {
+        ESP_LOGI(TAG, "JWT signature validation succeeded");
         result = auth_oidc_validate_claims_json((const char *)payload_json);
+    } else {
+        ESP_LOGW(TAG, "JWT validation failed: signature result=%d", result);
     }
 
 cleanup:
@@ -953,15 +1039,20 @@ esp_err_t auth_oidc_start(const app_config_t *config)
 auth_result_t auth_oidc_validate_authorization_header(const char *header)
 {
     if (header == NULL || strncmp(header, "Bearer ", 7) != 0) {
+        ESP_LOGW(TAG, "authorization failed: missing Bearer header");
         return AUTH_RESULT_MISSING;
     }
     if (!app_status_get().auth_ready) {
+        ESP_LOGW(TAG, "authorization blocked: auth metadata is not ready");
         return AUTH_RESULT_NOT_READY;
     }
     if (!app_status_get().time_synced) {
+        ESP_LOGW(TAG, "authorization blocked: time is not synchronized");
         return AUTH_RESULT_NOT_READY;
     }
 
+    ESP_LOGI(TAG, "authorization header accepted: token_len=%u",
+             (unsigned)strlen(header + 7));
     return verify_jwt_signature_and_claims(header + 7);
 }
 

@@ -8,6 +8,7 @@
 #include "app_status.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,6 +18,7 @@
 
 #define API_AUTH_HEADER_MAX CONFIG_HTTPD_MAX_REQ_HDR_LEN
 
+static const char *TAG = "api_server";
 static httpd_handle_t s_server;
 static bool s_server_starting;
 static portMUX_TYPE s_server_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -75,8 +77,12 @@ static esp_err_t latest_handler(httpd_req_t *req)
                                               auth_header_len + 1);
     }
 
+    ESP_LOGI(TAG, "latest auth header: len=%u max=%d read=%s",
+             (unsigned)auth_header_len, API_AUTH_HEADER_MAX, esp_err_to_name(hdr_err));
+
     auth_result_t auth =
         auth_oidc_validate_authorization_header(hdr_err == ESP_OK ? auth_header : NULL);
+    ESP_LOGI(TAG, "latest auth result=%d", auth);
     free(auth_header);
     if (auth == AUTH_RESULT_MISSING || auth == AUTH_RESULT_INVALID) {
         return json_send_error(req, 401, "unauthorized", "missing or invalid bearer token");

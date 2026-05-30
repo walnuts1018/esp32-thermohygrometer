@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -45,7 +47,14 @@ func main() {
 		AuthStyle:      oauth2.AuthStyleInHeader,
 	}
 
-	client := config.Client(ctx)
+	token, err := config.TokenSource(ctx).Token()
+	if err != nil {
+		slog.Error("failed to get access token", "error", err)
+		os.Exit(1)
+	}
+	logAccessTokenDiagnostics(token.AccessToken, token.TokenType, token.Expiry)
+
+	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(token))
 	measureURL, err := url.JoinPath(deviceURL, "/v1/measurements/latest")
 	if err != nil {
 		slog.Error("failed to join URL", "error", err)
@@ -65,7 +74,11 @@ func main() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Error("unexpected status", "status", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		slog.Error("unexpected status",
+			"status", resp.Status,
+			"body", strings.TrimSpace(string(body)),
+		)
 		os.Exit(1)
 	}
 
@@ -82,6 +95,38 @@ func main() {
 		"i2c_address", latest.I2CAddress,
 		"measured_at_ms", latest.MeasuredAtMS,
 	)
+}
+
+func logAccessTokenDiagnostics(accessToken, tokenType string, expiry time.Time) {
+	slog.Info("access token acquired",
+		"token_type", tokenType,
+		"access_token_length", len(accessToken),
+		"authorization_header_length", len("Bearer ")+len(accessToken),
+		"expiry", expiry.Format(time.RFC3339),
+	)
+
+	parts := strings.Split(accessToken, ".")
+	if len(parts) != 3 {
+		slog.Warn("access token is not a JWT", "segments", len(parts))
+		return
+	}
+
+	slog.Info("access token JWT segments",
+		"header_length", len(parts[0]),
+		"payload_length", len(parts[1]),
+		"signature_length", len(parts[2]),
+	)
+	logJWTPart("access token header", parts[0])
+	logJWTPart("access token payload", parts[1])
+}
+
+func logJWTPart(message, raw string) {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		slog.Warn("failed to decode JWT segment", "segment", message, "error", err)
+		return
+	}
+	slog.Info(message, "json", string(decoded))
 }
 
 func mustLoadEnv(name string) string {
