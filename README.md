@@ -10,7 +10,7 @@ Wi-Fi 設定は ESP-IDF の SoftAP provisioning で投入します。測定値 A
 - `GET /healthz` でデバイス状態を確認する
 - `GET /v1/measurements/latest` で最新の測定値を JSON で取得する
 - ZITADEL のアクセストークンで測定値 API を保護する
-- Dev Container だけでビルド、テスト、書き込みを行う
+- Dev Container でビルドとテストを行い、ホスト側から ESP32 に書き込む
 
 ## 必要なもの
 
@@ -26,10 +26,14 @@ Wi-Fi 設定は ESP-IDF の SoftAP provisioning で投入します。測定値 A
 
 - Docker
 - Dev Container CLI
+- Python 3
+- esptool.py
+  - ESP32 への書き込みとシリアル確認に使います
 - ESP-IDF provisioning に対応したクライアント
   - スマートフォンアプリ、または ESP-IDF の provisioning 用ツールを使います
 
-ローカル環境へ ESP-IDF を直接インストールする必要はありません。ビルドや書き込みは Dev Container 内で実行します。
+ローカル環境へ ESP-IDF を直接インストールする必要はありません。ビルドとテストは Dev Container 内で実行します。
+USB シリアルデバイスは Dev Container から見えない場合があるため、ESP32 への書き込みとシリアル確認はホスト側で行います。
 
 ## 配線
 
@@ -62,27 +66,71 @@ devcontainer up --workspace-folder .
 ### 3. ファームウェアをビルドする
 
 ```sh
-devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.py -B /tmp/esp32-thermohygrometer-build set-target esp32"
-devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.py -B /tmp/esp32-thermohygrometer-build build"
+devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.py -B build set-target esp32"
+devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.py -B build build"
 ```
 
-`Project build complete.` が表示されれば成功です。
+`Project build complete.` が表示されれば成功です。書き込みに使う `build/flash_args` と各 `.bin` ファイルもこの時点で作成されます。
 
 ### 4. ESP32 に書き込む
 
-ESP32 を USB で接続し、コンテナ内から見えるシリアルデバイスを確認します。
+ホスト側で esptool.py をインストールします。
+
+macOS では Homebrew で入れるのが簡単です。
 
 ```sh
-devcontainer exec --workspace-folder . bash -c "ls -l /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || true"
+brew install esptool
 ```
 
-通常は `/dev/ttyUSB0` または `/dev/ttyACM0` です。環境に合わせて `-p` の値を変更してください。
+Linux では OS のパッケージを使います。Debian/Ubuntu の例:
 
 ```sh
-devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.py -B /tmp/esp32-thermohygrometer-build -p /dev/ttyUSB0 flash monitor"
+sudo apt install esptool
 ```
 
-書き込み後、ログが流れ始めます。終了するときは `Ctrl+]` を押します。
+ESP32 を USB で接続し、ホスト側から見えるシリアルデバイスを確認します。
+
+macOS の例:
+
+```sh
+find /dev -maxdepth 1 \
+  \( -name 'cu.usbserial*' -o -name 'cu.SLAB_USBtoUART*' -o -name 'cu.wchusbserial*' \) \
+  -print
+```
+
+Linux の例:
+
+```sh
+find /dev -maxdepth 1 \( -name 'ttyUSB*' -o -name 'ttyACM*' \) -print
+```
+
+見つかったデバイスを `ESPPORT` に指定し、ホスト側から書き込みます。
+
+macOS の例:
+
+```sh
+ESPPORT=/dev/cu.usbserial-0001
+cd build
+esptool --chip esp32 -p "$ESPPORT" -b 460800 write_flash @flash_args
+cd ..
+```
+
+Linux の例:
+
+```sh
+ESPPORT=/dev/ttyUSB0
+cd build
+esptool --chip esp32 -p "$ESPPORT" -b 460800 write_flash @flash_args
+cd ..
+```
+
+書き込み後にログを見る場合は、ホスト側でシリアルモニターを起動します。
+
+```sh
+screen "$ESPPORT" 115200
+```
+
+終了するときは `Ctrl+A` を押してから `K` を押します。
 
 ## Wi-Fi 設定
 
@@ -205,16 +253,23 @@ devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && cd t
 
 ## よくあるトラブル
 
-### シリアルデバイスが見えない
+### ホスト側でシリアルデバイスが見えない
 
-コンテナから `/dev/ttyUSB0` や `/dev/ttyACM0` が見えない場合は、USB ケーブル、OS 側の USB シリアルドライバー、Dev Container へのデバイス公開設定を確認してください。
+Dev Container ではなく、ホスト側でシリアルデバイスを確認してください。macOS では `/dev/cu.usbserial*` や `/dev/cu.SLAB_USBtoUART*`、Linux では `/dev/ttyUSB*` や `/dev/ttyACM*` として見えることが多いです。
+
+ホスト側にも表示されない場合は、USB ケーブル、ESP32 ボードの USB シリアルドライバー、OS のデバイスアクセス権限を確認してください。
+macOS ではボードによって `/dev/cu.wchusbserial*` として見えることもあります。
 
 ### Wi-Fi provisioning が始まらない
 
 保存済み Wi-Fi 情報がある場合、ESP32 はまず STA 接続を試します。接続に失敗すると provisioning に戻ります。設定を完全に消したい場合は、NVS を消去してから再書き込みしてください。
 
 ```sh
-devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.py -B /tmp/esp32-thermohygrometer-build -p /dev/ttyUSB0 erase-flash flash monitor"
+ESPPORT=/dev/cu.usbserial-0001
+esptool.py --chip esp32 -p "$ESPPORT" erase_flash
+cd build
+esptool.py --chip esp32 -p "$ESPPORT" -b 460800 write_flash @flash_args
+cd ..
 ```
 
 ### `/v1/measurements/latest` が `503` を返す
