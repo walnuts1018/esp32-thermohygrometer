@@ -16,5 +16,5 @@
             }
         }
     },
-    "postCreateCommand": "bash -c '. /opt/esp/idf/export.sh && idf.py build'"
+    "postCreateCommand": "bash -c '. /opt/esp/idf/export.sh && idf.py -B /tmp/esp32-thermohygrometer-build build'"
 }
