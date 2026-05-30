@@ -30,7 +30,7 @@ Wi-Fi 設定は ESP-IDF の SoftAP provisioning で投入します。測定値 A
 - esptool
   - ESP32 への書き込みとシリアル確認に使います
 - ESP-IDF provisioning に対応したクライアント
-  - スマートフォンアプリ、または ESP-IDF の provisioning 用ツールを使います
+  - この README では Dev Container 内の `esp_prov.py` を使います
 
 ローカル環境へ ESP-IDF を直接インストールする必要はありません。ビルドとテストは Dev Container 内で実行します。
 USB シリアルデバイスは Dev Container から見えない場合があるため、ESP32 への書き込みとシリアル確認はホスト側で行います。
@@ -130,6 +130,55 @@ ESP-IDF provisioning 対応クライアントから上記の値を指定し、�
 provisioning が成功すると、ファームウェアは Wi-Fi 情報と認証設定を NVS に保存して再起動します。再起動後、保存済み Wi-Fi へ自動接続します。
 
 デバイスの IP アドレスは、再起動後のシリアルモニターのログ、またはルーターの DHCP クライアント一覧で確認します。
+
+### コマンドで provisioning する
+
+まず通常のインターネット接続がある状態で、Dev Container 内の provisioning tool が動くことを確認します。Dev Container の初回作成時に必要な Python パッケージは入りますが、既存の Dev Container を使っている場合は次のコマンドを一度だけ実行してください。
+
+```sh
+devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && python -m pip install protobuf cryptography"
+```
+
+`esp_prov.py --help` が表示できれば準備完了です。
+
+```sh
+devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && python managed_components/espressif__network_provisioning/tool/esp_prov/esp_prov.py --help"
+```
+
+次に、PC の Wi-Fi 接続先を `thermohygrometer-setup` に切り替えます。接続後、ESP32 は通常 `192.168.4.1` で provisioning API を待ち受けます。
+
+別のターミナルで Dev Container 内に入り、`esp_prov.py` を実行します。`YOUR_WIFI_SSID` と `YOUR_WIFI_PASSWORD` は、ESP32 を接続したい Wi-Fi の値に置き換えてください。
+
+```sh
+devcontainer exec --workspace-folder . bash
+```
+
+Dev Container 内で次を実行します。
+
+```sh
+. /opt/esp/idf/export.sh
+
+python managed_components/espressif__network_provisioning/tool/esp_prov/esp_prov.py \
+  --transport softap \
+  --service_name 192.168.4.1:80 \
+  --sec_ver 1 \
+  --pop thermohygrometer \
+  --custom_data '{"audience":"thermo-api","issuer":"https://auth.walnuts.dev","role":"thermohygrometer.read"}' \
+  --ssid 'YOUR_WIFI_SSID' \
+  --passphrase 'YOUR_WIFI_PASSWORD'
+```
+
+成功すると、シリアルモニターに provisioning 完了と再起動のログが表示されます。再起動後に次のログが出れば Wi-Fi 情報と認証設定の保存は完了です。
+
+```text
+config loaded: wifi=set auth_audience=set
+```
+
+その後、PC の Wi-Fi 接続先を元のネットワークへ戻し、ESP32 の IP アドレスに対して `/healthz` を確認します。
+
+```sh
+curl http://DEVICE_IP/healthz
+```
 
 ## 認証設定
 

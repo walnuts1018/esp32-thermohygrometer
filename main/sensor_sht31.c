@@ -24,6 +24,7 @@ esp_err_t sht31_init(void)
 
     const i2c_master_bus_config_t bus_config = {
         .i2c_port = SHT31_I2C_PORT,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
         .sda_io_num = SHT31_SDA_GPIO,
         .scl_io_num = SHT31_SCL_GPIO,
         .glitch_ignore_cnt = 7,
