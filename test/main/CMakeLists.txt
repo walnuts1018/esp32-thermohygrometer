@@ -2,11 +2,14 @@ idf_component_register(
     SRCS
         "test_app_main.c"
         "../test_sensor_sht31.c"
+        "../test_sensor_task.c"
         "../../main/sensor_sht31.c"
+        "../../main/sensor_task.c"
     INCLUDE_DIRS
         "."
         "../../main"
     REQUIRES
         unity
         driver
+        esp_timer
 )
