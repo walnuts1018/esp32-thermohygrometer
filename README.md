@@ -249,6 +249,25 @@ curl -H "Authorization: Bearer $ACCESS_TOKEN" \
 }
 ```
 
+### Go から Access Token を取得して呼び出す
+
+`example/main.go` に、OAuth2 client credentials grant で Access Token を取得して `/v1/measurements/latest` を呼び出す最小サンプルがあります。ブラウザログインは使わず、システム間連携用の client ID / client secret を使います。
+
+```sh
+cd example
+
+export DEVICE_URL="http://DEVICE_IP"
+export OIDC_TOKEN_URL="https://auth.walnuts.dev/oauth/v2/token"
+export OIDC_CLIENT_ID="YOUR_CLIENT_ID"
+export OIDC_CLIENT_SECRET="YOUR_CLIENT_SECRET"
+export OIDC_AUDIENCE="thermo-api"
+export OIDC_SCOPES="openid"
+
+go run .
+```
+
+`OIDC_AUDIENCE` は provisioning でデバイスに保存した `audience` と同じ値を指定します。IdP 側で audience を scope で指定する構成の場合は、`OIDC_AUDIENCE` を空にして `OIDC_SCOPES` に必要な scope を追加してください。
+
 ### 認証エラーを確認する
 
 トークンを付けない場合は `401 Unauthorized` になります。
