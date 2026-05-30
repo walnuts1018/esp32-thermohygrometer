@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "app_config.c"
+        "app_runtime.c"
         "app_status.c"
         "wifi_manager.c"
         "sensor_sht31.c"
@@ -24,5 +25,4 @@ idf_component_register(
         esp_driver_i2c
         mbedtls
         espressif__cjson
-        driver
 )

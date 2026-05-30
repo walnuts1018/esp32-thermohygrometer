@@ -504,3 +504,11 @@ esp_err_t wifi_manager_start(const app_config_t *config)
 
     return wifi_manager_start_provisioning();
 }
+
+bool wifi_manager_is_provisioning(void)
+{
+    taskENTER_CRITICAL(&s_init_lock);
+    bool provisioning = s_provisioning_started;
+    taskEXIT_CRITICAL(&s_init_lock);
+    return provisioning;
+}

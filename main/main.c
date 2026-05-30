@@ -1,5 +1,6 @@
 #include "api_server.h"
 #include "app_config.h"
+#include "app_runtime.h"
 #include "auth_oidc.h"
 #include "esp_log.h"
 #include "sensor_task.h"
@@ -18,6 +19,11 @@ void app_main(void)
              app_config_has_auth_audience(&config) ? "set" : "missing");
 
     ESP_ERROR_CHECK(wifi_manager_start(&config));
+    if (!app_runtime_should_start_api(&config, wifi_manager_is_provisioning())) {
+        ESP_LOGI(TAG, "Wi-Fi provisioning is active; API server will start after provisioning reboot");
+        return;
+    }
+
     ESP_ERROR_CHECK(auth_oidc_start(&config));
     ESP_ERROR_CHECK(sensor_task_start());
     ESP_ERROR_CHECK(api_server_start());

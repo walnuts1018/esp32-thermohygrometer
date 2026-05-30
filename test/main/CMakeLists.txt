@@ -4,7 +4,9 @@ idf_component_register(
         "../test_sensor_sht31.c"
         "../test_sensor_task.c"
         "../test_auth_claims.c"
+        "../test_app_runtime.c"
         "../../main/app_config.c"
+        "../../main/app_runtime.c"
         "../../main/app_status.c"
         "../../main/auth_oidc.c"
         "../../main/sensor_sht31.c"
@@ -14,7 +16,6 @@ idf_component_register(
         "../../main"
     REQUIRES
         unity
-        driver
         esp_driver_i2c
         esp_driver_gpio
         esp_timer

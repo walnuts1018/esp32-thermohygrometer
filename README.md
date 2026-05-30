@@ -27,7 +27,7 @@ Wi-Fi 設定は ESP-IDF の SoftAP provisioning で投入します。測定値 A
 - Docker
 - Dev Container CLI
 - Python 3
-- esptool.py
+- esptool
   - ESP32 への書き込みとシリアル確認に使います
 - ESP-IDF provisioning に対応したクライアント
   - スマートフォンアプリ、または ESP-IDF の provisioning 用ツールを使います
@@ -74,20 +74,6 @@ devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.
 
 ### 4. ESP32 に書き込む
 
-ホスト側で esptool.py をインストールします。
-
-macOS では Homebrew で入れるのが簡単です。
-
-```sh
-brew install esptool
-```
-
-Linux では OS のパッケージを使います。Debian/Ubuntu の例:
-
-```sh
-sudo apt install esptool
-```
-
 ESP32 を USB で接続し、ホスト側から見えるシリアルデバイスを確認します。
 
 macOS の例:
@@ -111,7 +97,7 @@ macOS の例:
 ```sh
 ESPPORT=/dev/cu.usbserial-0001
 cd build
-esptool --chip esp32 -p "$ESPPORT" -b 460800 write_flash @flash_args
+esptool --chip esp32 -p "$ESPPORT" -b 460800 write-flash @flash_args
 cd ..
 ```
 
@@ -120,7 +106,7 @@ Linux の例:
 ```sh
 ESPPORT=/dev/ttyUSB0
 cd build
-esptool --chip esp32 -p "$ESPPORT" -b 460800 write_flash @flash_args
+esptool --chip esp32 -p "$ESPPORT" -b 460800 write-flash @flash_args
 cd ..
 ```
 
@@ -266,9 +252,9 @@ macOS ではボードによって `/dev/cu.wchusbserial*` として見えるこ�
 
 ```sh
 ESPPORT=/dev/cu.usbserial-0001
-esptool.py --chip esp32 -p "$ESPPORT" erase_flash
+esptool --chip esp32 -p "$ESPPORT" erase-flash
 cd build
-esptool.py --chip esp32 -p "$ESPPORT" -b 460800 write_flash @flash_args
+esptool --chip esp32 -p "$ESPPORT" -b 460800 write-flash @flash_args
 cd ..
 ```
 
