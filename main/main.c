@@ -1,3 +1,4 @@
+#include "api_server.h"
 #include "app_config.h"
 #include "esp_log.h"
 #include "sensor_task.h"
@@ -15,4 +16,5 @@ void app_main(void)
              app_config_has_auth_audience(&config) ? "set" : "missing");
 
     ESP_ERROR_CHECK(sensor_task_start());
+    ESP_ERROR_CHECK(api_server_start());
 }
