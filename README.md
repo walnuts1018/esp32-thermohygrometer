@@ -14,3 +14,11 @@ idf.py build
 ```sh
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
+
+## Tests
+
+```sh
+cd test
+idf.py set-target esp32
+idf.py build
+```

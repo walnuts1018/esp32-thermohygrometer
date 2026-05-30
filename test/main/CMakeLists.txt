@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "test_app_main.c"
+        "../test_sensor_sht31.c"
+        "../../main/sensor_sht31.c"
+    INCLUDE_DIRS
+        "."
+        "../../main"
+    REQUIRES
+        unity
+        driver
+)
