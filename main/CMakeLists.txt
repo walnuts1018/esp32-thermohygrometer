@@ -2,7 +2,6 @@ idf_component_register(
     SRCS
         "main.c"
         "app_config.c"
-        "app_runtime.c"
         "app_status.c"
         "wifi_manager.c"
         "sensor_sht31.c"
