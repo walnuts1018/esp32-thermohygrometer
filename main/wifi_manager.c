@@ -1,14 +1,17 @@
 #include "wifi_manager.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "app_status.h"
+#include "cJSON.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_sntp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -25,6 +28,7 @@
 #define WIFI_WAIT_MS 30000
 #define SNTP_WAIT_MS 30000
 #define SANE_EPOCH_TIME 1700000000
+#define AUTH_HTTPS_SCHEME "https://"
 
 static const char *TAG = "wifi_manager";
 
@@ -36,11 +40,120 @@ static bool s_event_loop_initialized;
 static bool s_wifi_initialized;
 static bool s_handlers_registered;
 static bool s_provisioning_started;
+static bool s_provisioning_completed;
 static bool s_sntp_sync_running;
 static int s_retry_count;
+static wifi_sta_config_t s_pending_wifi_config;
+static bool s_pending_wifi_config_valid;
 static portMUX_TYPE s_init_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void wifi_manager_sntp_task(void *arg);
+
+static bool wifi_manager_fits_string(const char *value, size_t buffer_size)
+{
+    return value != NULL && strnlen(value, buffer_size) < buffer_size;
+}
+
+static bool wifi_manager_valid_issuer(const char *issuer)
+{
+    if (!wifi_manager_fits_string(issuer, APP_CONFIG_MAX_URL_LEN)) {
+        return false;
+    }
+
+    size_t len = strlen(issuer);
+    return strncmp(issuer, AUTH_HTTPS_SCHEME, strlen(AUTH_HTTPS_SCHEME)) == 0 &&
+           len > strlen(AUTH_HTTPS_SCHEME) &&
+           issuer[len - 1] != '/';
+}
+
+static esp_err_t wifi_manager_save_custom_auth(const char *json, size_t json_len)
+{
+    if (json == NULL || json_len == 0 || memchr(json, '\0', json_len) != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char *body = strndup(json, json_len);
+    if (body == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON *root = cJSON_ParseWithOpts(body, NULL, true);
+    free(body);
+    if (root == NULL || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    app_config_t config = {0};
+    esp_err_t err = app_config_load(&config);
+    if (err != ESP_OK) {
+        cJSON_Delete(root);
+        return err;
+    }
+
+    const cJSON *issuer = cJSON_GetObjectItemCaseSensitive(root, "issuer");
+    const cJSON *audience = cJSON_GetObjectItemCaseSensitive(root, "audience");
+    const cJSON *role = cJSON_GetObjectItemCaseSensitive(root, "role");
+
+    if (issuer != NULL) {
+        if (!cJSON_IsString(issuer) || !wifi_manager_valid_issuer(issuer->valuestring)) {
+            err = ESP_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+        strlcpy(config.issuer, issuer->valuestring, sizeof(config.issuer));
+    }
+    if (audience != NULL) {
+        if (!cJSON_IsString(audience) ||
+            !wifi_manager_fits_string(audience->valuestring, APP_CONFIG_MAX_AUDIENCE_LEN)) {
+            err = ESP_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+        strlcpy(config.audience, audience->valuestring, sizeof(config.audience));
+    }
+    if (role != NULL) {
+        if (!cJSON_IsString(role) ||
+            !wifi_manager_fits_string(role->valuestring, APP_CONFIG_MAX_ROLE_LEN)) {
+            err = ESP_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+        strlcpy(config.role, role->valuestring, sizeof(config.role));
+    }
+
+    if (!app_config_has_auth_audience(&config)) {
+        err = ESP_ERR_INVALID_ARG;
+        goto cleanup;
+    }
+
+    err = app_config_save_auth(config.issuer, config.audience, config.role);
+
+cleanup:
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t wifi_manager_custom_data_handler(uint32_t session_id,
+                                                  const uint8_t *inbuf,
+                                                  ssize_t inlen,
+                                                  uint8_t **outbuf,
+                                                  ssize_t *outlen,
+                                                  void *priv_data)
+{
+    (void)session_id;
+    (void)priv_data;
+
+    if (outbuf == NULL || outlen == NULL || inlen < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = wifi_manager_save_custom_auth((const char *)inbuf, (size_t)inlen);
+    const char *response = (err == ESP_OK) ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}";
+    *outbuf = (uint8_t *)strdup(response);
+    if (*outbuf == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    *outlen = strlen(response) + 1;
+    return err;
+}
 
 static void wifi_manager_request_time_sync(void)
 {
@@ -76,7 +189,59 @@ static void wifi_manager_request_time_sync(void)
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
-    (void)event_data;
+
+    if (event_base == NETWORK_PROV_EVENT) {
+        if (event_id == NETWORK_PROV_WIFI_CRED_RECV && event_data != NULL) {
+            taskENTER_CRITICAL(&s_init_lock);
+            s_pending_wifi_config = *(wifi_sta_config_t *)event_data;
+            s_pending_wifi_config_valid = true;
+            taskEXIT_CRITICAL(&s_init_lock);
+            return;
+        }
+
+        if (event_id == NETWORK_PROV_WIFI_CRED_SUCCESS) {
+            wifi_sta_config_t wifi_config = {0};
+            bool has_pending = false;
+            taskENTER_CRITICAL(&s_init_lock);
+            wifi_config = s_pending_wifi_config;
+            has_pending = s_pending_wifi_config_valid;
+            s_provisioning_completed = true;
+            taskEXIT_CRITICAL(&s_init_lock);
+
+            if (has_pending) {
+                char ssid[APP_CONFIG_MAX_SSID_LEN + 1] = {0};
+                char password[APP_CONFIG_MAX_PASSWORD_LEN + 1] = {0};
+                size_t ssid_len = strnlen((const char *)wifi_config.ssid, sizeof(wifi_config.ssid));
+                size_t password_len = strnlen((const char *)wifi_config.password, sizeof(wifi_config.password));
+                memcpy(ssid, wifi_config.ssid, ssid_len);
+                memcpy(password, wifi_config.password, password_len);
+
+                esp_err_t err = app_config_save_wifi(ssid, password);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "failed to save provisioned Wi-Fi credentials: %s", esp_err_to_name(err));
+                }
+            }
+            return;
+        }
+
+        if (event_id == NETWORK_PROV_END) {
+            esp_err_t err = network_prov_mgr_deinit();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "provisioning manager deinit failed: %s", esp_err_to_name(err));
+            }
+
+            taskENTER_CRITICAL(&s_init_lock);
+            bool should_restart = s_provisioning_completed;
+            taskEXIT_CRITICAL(&s_init_lock);
+            if (should_restart) {
+                ESP_LOGI(TAG, "restarting after provisioning to load saved configuration");
+                esp_restart();
+            }
+            return;
+        }
+
+        return;
+    }
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
@@ -182,6 +347,13 @@ static esp_err_t wifi_manager_init_stack(void)
                                                                NULL),
                             TAG,
                             "ip handler register failed");
+        ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(NETWORK_PROV_EVENT,
+                                                               ESP_EVENT_ANY_ID,
+                                                               wifi_event_handler,
+                                                               NULL,
+                                                               NULL),
+                            TAG,
+                            "provisioning handler register failed");
         s_handlers_registered = true;
     }
 
@@ -290,6 +462,7 @@ static esp_err_t wifi_manager_start_provisioning(void)
         .scheme_event_handler = NETWORK_PROV_EVENT_HANDLER_NONE,
     };
     ESP_RETURN_ON_ERROR(network_prov_mgr_init(prov_config), TAG, "provisioning manager init failed");
+    ESP_RETURN_ON_ERROR(network_prov_mgr_endpoint_create("custom-data"), TAG, "custom endpoint create failed");
 
     const char *service_name = "thermohygrometer-setup";
     const char *pop = "thermohygrometer";
@@ -303,6 +476,11 @@ static esp_err_t wifi_manager_start_provisioning(void)
                                                          NULL),
                         TAG,
                         "start provisioning failed");
+    ESP_RETURN_ON_ERROR(network_prov_mgr_endpoint_register("custom-data",
+                                                           wifi_manager_custom_data_handler,
+                                                           NULL),
+                        TAG,
+                        "custom endpoint register failed");
     s_provisioning_started = true;
     return ESP_OK;
 }

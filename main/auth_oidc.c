@@ -14,6 +14,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/asn1.h"
+#include "mbedtls/asn1write.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 #include "mbedtls/pk.h"
@@ -33,6 +35,7 @@ static app_config_t s_config;
 static SemaphoreHandle_t s_auth_mutex;
 static TaskHandle_t s_auth_task_handle;
 static bool s_auth_task_starting;
+static bool s_psa_crypto_initialized;
 static char *s_jwks_json;
 static char s_jwks_uri[APP_CONFIG_MAX_URL_LEN];
 static portMUX_TYPE s_auth_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -212,10 +215,7 @@ static bool json_string_array_contains(const cJSON *item, const char *expected)
 
 static bool roles_claim_contains(const cJSON *root, const char *role)
 {
-    /* ZITADEL emits role claims in two forms:
-     *   project-specific: urn:zitadel:iam:org:project:{projectId}:roles
-     *   global:           urn:zitadel:iam:org:project:roles
-     * Both forms are objects whose keys are role names. */
+    /* ZITADEL の role claim は project 固有形式と global 形式の両方があり、どちらも role 名を key に持つ object。 */
     static const char roles_prefix[] = "urn:zitadel:iam:org:project:";
     static const char roles_suffix[] = ":roles";
     static const char global_roles[] = "urn:zitadel:iam:org:project:roles";
@@ -232,11 +232,8 @@ static bool roles_claim_contains(const cJSON *root, const char *role)
             continue;
         }
 
-        /* Check global form first (exact match). */
         bool is_global = strcmp(claim_name, global_roles) == 0;
 
-        /* Check project-specific form: prefix match + suffix ":roles",
-         * but exclude the global form (which has no project ID segment). */
         bool is_project_specific = false;
         if (!is_global && strncmp(claim_name, roles_prefix, strlen(roles_prefix)) == 0) {
             size_t claim_name_len = strlen(claim_name);
@@ -272,6 +269,9 @@ auth_result_t auth_oidc_validate_claims_json(const char *claims_json)
 {
     if (claims_json == NULL) {
         return AUTH_RESULT_INVALID;
+    }
+    if (!app_status_get().time_synced) {
+        return AUTH_RESULT_NOT_READY;
     }
 
     app_config_t config;
@@ -441,137 +441,76 @@ static const cJSON *find_jwk_by_kid(const cJSON *jwks, const char *kid)
     return NULL;
 }
 
-/* Write a DER-encoded ASN.1 TLV into a buffer that grows leftward.
- * Returns the updated write pointer, or NULL on overflow. */
-static unsigned char *asn1_write_len_left(unsigned char *p, const unsigned char *start, size_t len)
+static bool asn1_add_len(int *total, int written)
 {
-    if (len < 0x80) {
-        if (p - start < 1) {
-            return NULL;
-        }
-        *--p = (unsigned char)len;
-    } else if (len <= 0xff) {
-        if (p - start < 2) {
-            return NULL;
-        }
-        *--p = (unsigned char)len;
-        *--p = 0x81;
-    } else if (len <= 0xffff) {
-        if (p - start < 3) {
-            return NULL;
-        }
-        *--p = (unsigned char)(len & 0xff);
-        *--p = (unsigned char)(len >> 8);
-        *--p = 0x82;
-    } else {
-        return NULL;
+    if (written < 0) {
+        return false;
     }
-    return p;
+    *total += written;
+    return true;
 }
 
-static unsigned char *asn1_write_tag_left(unsigned char *p, const unsigned char *start, unsigned char tag)
-{
-    if (p - start < 1) {
-        return NULL;
-    }
-    *--p = tag;
-    return p;
-}
-
-static unsigned char *asn1_write_integer_left(unsigned char *p, const unsigned char *start,
-                                              const unsigned char *val, size_t val_len)
-{
-    /* Prepend value bytes */
-    if (p - start < (ptrdiff_t)val_len) {
-        return NULL;
-    }
-    p -= val_len;
-    memcpy(p, val, val_len);
-
-    /* Prepend leading zero byte if high bit is set */
-    if (val_len > 0 && (val[0] & 0x80)) {
-        if (p - start < 1) {
-            return NULL;
-        }
-        *--p = 0x00;
-        val_len++;
-    }
-
-    p = asn1_write_len_left(p, start, val_len);
-    if (p == NULL) {
-        return NULL;
-    }
-    return asn1_write_tag_left(p, start, 0x02); /* INTEGER */
-}
-
-/* Build SubjectPublicKeyInfo DER for an RSA key:
- *   SEQUENCE {
- *     SEQUENCE { OID rsaEncryption, NULL }
- *     BIT STRING { SEQUENCE { INTEGER n, INTEGER e } }
- *   }
- * Returns number of bytes written into der_out (written at the END of der_out),
- * or 0 on failure.
- */
 static size_t build_rsa_spki_der(const unsigned char *n, size_t n_len,
                                  const unsigned char *e, size_t e_len,
                                  unsigned char *der_out, size_t der_out_len)
 {
-    /* RSA OID: 1.2.840.113549.1.1.1 */
-    static const unsigned char rsa_oid[] = {
-        0x06, 0x09, /* OID, 9 bytes */
-        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
-        0x05, 0x00  /* NULL */
-    };
+    static const char rsa_oid[] = "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";
 
     unsigned char *p = der_out + der_out_len;
-    const unsigned char *start = der_out;
+    unsigned char *start = der_out;
 
-    /* RSAPublicKey = SEQUENCE { INTEGER n, INTEGER e } */
-    unsigned char *rsa_pub_end = p;
+    int rsa_pub_len = 0;
+    if (!asn1_add_len(&rsa_pub_len, mbedtls_asn1_write_integer(&p, start, e, e_len)) ||
+        !asn1_add_len(&rsa_pub_len, mbedtls_asn1_write_integer(&p, start, n, n_len)) ||
+        !asn1_add_len(&rsa_pub_len, mbedtls_asn1_write_len(&p, start, (size_t)rsa_pub_len)) ||
+        !asn1_add_len(&rsa_pub_len, mbedtls_asn1_write_tag(&p, start, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE))) {
+        return 0;
+    }
 
-    p = asn1_write_integer_left(p, start, e, e_len);
-    if (p == NULL) return 0;
-    p = asn1_write_integer_left(p, start, n, n_len);
-    if (p == NULL) return 0;
+    int bit_string_len = 0;
+    if (p - start < 1) {
+        return 0;
+    }
+    *--p = 0x00;
+    bit_string_len = rsa_pub_len + 1;
+    if (!asn1_add_len(&bit_string_len, mbedtls_asn1_write_len(&p, start, (size_t)bit_string_len)) ||
+        !asn1_add_len(&bit_string_len, mbedtls_asn1_write_tag(&p, start, MBEDTLS_ASN1_BIT_STRING))) {
+        return 0;
+    }
 
-    size_t rsa_pub_len = (size_t)(rsa_pub_end - p);
-    p = asn1_write_len_left(p, start, rsa_pub_len);
-    if (p == NULL) return 0;
-    p = asn1_write_tag_left(p, start, 0x30); /* SEQUENCE */
-    if (p == NULL) return 0;
+    int alg_id_len = mbedtls_asn1_write_algorithm_identifier(&p, start, rsa_oid, sizeof(rsa_oid) - 1, 0);
+    if (alg_id_len < 0) {
+        return 0;
+    }
 
-    size_t seq_inner_len = (size_t)(rsa_pub_end - p);
-
-    /* BIT STRING wrapping: tag=0x03, length=(seq_inner_len+1), content_byte=0x00 + data */
-    if (p - start < 1) return 0;
-    *--p = 0x00; /* no unused bits */
-    size_t bit_str_content_len = seq_inner_len + 1;
-    p = asn1_write_len_left(p, start, bit_str_content_len);
-    if (p == NULL) return 0;
-    p = asn1_write_tag_left(p, start, 0x03); /* BIT STRING */
-    if (p == NULL) return 0;
-
-    /* AlgorithmIdentifier = SEQUENCE { OID rsaEncryption, NULL } */
-    size_t oid_len = sizeof(rsa_oid);
-    if (p - start < (ptrdiff_t)oid_len) return 0;
-    p -= oid_len;
-    memcpy(p, rsa_oid, oid_len);
-    p = asn1_write_len_left(p, start, oid_len);
-    if (p == NULL) return 0;
-    p = asn1_write_tag_left(p, start, 0x30); /* SEQUENCE (AlgorithmIdentifier) */
-    if (p == NULL) return 0;
-
-    /* Outer SEQUENCE */
-    size_t outer_content_len = (size_t)((der_out + der_out_len) - p);
-    p = asn1_write_len_left(p, start, outer_content_len);
-    if (p == NULL) return 0;
-    p = asn1_write_tag_left(p, start, 0x30); /* SEQUENCE */
-    if (p == NULL) return 0;
+    int spki_len = bit_string_len + alg_id_len;
+    if (!asn1_add_len(&spki_len, mbedtls_asn1_write_len(&p, start, (size_t)spki_len)) ||
+        !asn1_add_len(&spki_len, mbedtls_asn1_write_tag(&p, start, MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE))) {
+        return 0;
+    }
 
     size_t total = (size_t)((der_out + der_out_len) - p);
-    /* Move to front */
     memmove(der_out, p, total);
     return total;
+}
+
+static bool auth_psa_crypto_init_once(void)
+{
+    taskENTER_CRITICAL(&s_auth_lock);
+    if (s_psa_crypto_initialized) {
+        taskEXIT_CRITICAL(&s_auth_lock);
+        return true;
+    }
+    taskEXIT_CRITICAL(&s_auth_lock);
+
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_auth_lock);
+    s_psa_crypto_initialized = true;
+    taskEXIT_CRITICAL(&s_auth_lock);
+    return true;
 }
 
 static auth_result_t verify_rs256_with_jwk(const char *signing_input,
@@ -602,7 +541,10 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
         goto cleanup_ne;
     }
 
-    /* Compute SHA-256 of signing_input using mbedtls_md */
+    if (!auth_psa_crypto_init_once()) {
+        goto cleanup_ne;
+    }
+
     unsigned char digest[32];
     const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     if (md_info == NULL ||
@@ -610,10 +552,6 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
         goto cleanup_ne;
     }
 
-    /* Build SubjectPublicKeyInfo DER from n and e */
-    /* Maximum DER size: 4 (outer seq) + 2 (alg seq) + 13 (OID+NULL) +
-     *                   4 (bitstring hdr) + 4 (inner seq) +
-     *                   (4+n_len+1) + (4+e_len+1)  */
     size_t der_buf_size = 32 + n_len + e_len;
     unsigned char *der_buf = malloc(der_buf_size);
     if (der_buf == NULL) {
@@ -626,7 +564,6 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
         goto cleanup_ne;
     }
 
-    /* Import key using PSA Crypto */
     psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_VERIFY_HASH);
     psa_set_key_algorithm(&attrs, PSA_ALG_RSA_PKCS1V15_SIGN(PSA_ALG_SHA_256));
@@ -1019,6 +956,9 @@ auth_result_t auth_oidc_validate_authorization_header(const char *header)
         return AUTH_RESULT_MISSING;
     }
     if (!app_status_get().auth_ready) {
+        return AUTH_RESULT_NOT_READY;
+    }
+    if (!app_status_get().time_synced) {
         return AUTH_RESULT_NOT_READY;
     }
 

@@ -1,7 +1,8 @@
 #include "sensor_sht31.h"
 
-#include "driver/gpio.h"
-#include "driver/i2c.h"
+#include <stdbool.h>
+
+#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -12,28 +13,37 @@
 #define SHT31_CRC_POLYNOMIAL 0x31
 #define SHT31_CRC_INIT 0xff
 
+static i2c_master_bus_handle_t s_i2c_bus;
+static i2c_master_dev_handle_t s_sht31_dev;
+
 esp_err_t sht31_init(void)
 {
-    const i2c_config_t config = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = SHT31_SDA_GPIO,
-        .scl_io_num = SHT31_SCL_GPIO,
-        .sda_pullup_en = GPIO_PULLUP_DISABLE,
-        .scl_pullup_en = GPIO_PULLUP_DISABLE,
-        .master.clk_speed = SHT31_I2C_FREQ_HZ,
-    };
-
-    esp_err_t err = i2c_param_config(SHT31_I2C_PORT, &config);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = i2c_driver_install(SHT31_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
-    if (err == ESP_ERR_INVALID_STATE) {
+    if (s_sht31_dev != NULL) {
         return ESP_OK;
     }
 
-    return err;
+    const i2c_master_bus_config_t bus_config = {
+        .i2c_port = SHT31_I2C_PORT,
+        .sda_io_num = SHT31_SDA_GPIO,
+        .scl_io_num = SHT31_SCL_GPIO,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = false,
+    };
+
+    if (s_i2c_bus == NULL) {
+        esp_err_t err = i2c_new_master_bus(&bus_config, &s_i2c_bus);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    const i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = SHT31_I2C_ADDR,
+        .scl_speed_hz = SHT31_I2C_FREQ_HZ,
+    };
+
+    return i2c_master_bus_add_device(s_i2c_bus, &dev_config, &s_sht31_dev);
 }
 
 esp_err_t sht31_read(sht31_reading_t *reading)
@@ -43,12 +53,16 @@ esp_err_t sht31_read(sht31_reading_t *reading)
     }
 
     const uint8_t command[2] = {0x24, 0x00};
-    esp_err_t err = i2c_master_write_to_device(
-        SHT31_I2C_PORT,
-        SHT31_I2C_ADDR,
+    esp_err_t err = sht31_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = i2c_master_transmit(
+        s_sht31_dev,
         command,
         sizeof(command),
-        pdMS_TO_TICKS(SHT31_READ_TIMEOUT_MS));
+        SHT31_READ_TIMEOUT_MS);
     if (err != ESP_OK) {
         return err;
     }
@@ -56,12 +70,11 @@ esp_err_t sht31_read(sht31_reading_t *reading)
     vTaskDelay(pdMS_TO_TICKS(SHT31_MEASUREMENT_DELAY_MS));
 
     uint8_t data[6] = {0};
-    err = i2c_master_read_from_device(
-        SHT31_I2C_PORT,
-        SHT31_I2C_ADDR,
+    err = i2c_master_receive(
+        s_sht31_dev,
         data,
         sizeof(data),
-        pdMS_TO_TICKS(SHT31_READ_TIMEOUT_MS));
+        SHT31_READ_TIMEOUT_MS);
     if (err != ESP_OK) {
         return err;
     }

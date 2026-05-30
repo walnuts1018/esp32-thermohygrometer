@@ -14,4 +14,6 @@ typedef struct {
 
 esp_err_t sensor_task_start(void);
 esp_err_t sensor_latest_get(sensor_latest_reading_t *out);
+void sensor_latest_store(const sensor_latest_reading_t *reading);
 void sensor_latest_store_for_test(const sensor_latest_reading_t *reading);
+void sensor_latest_store_error_for_test(esp_err_t err);

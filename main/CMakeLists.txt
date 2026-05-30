@@ -21,6 +21,7 @@ idf_component_register(
         esp_http_client
         esp-tls
         esp_timer
+        esp_driver_i2c
         mbedtls
         espressif__cjson
         driver

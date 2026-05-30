@@ -54,12 +54,13 @@ static void sensor_latest_store_error(esp_err_t err)
     }
 
     if (xSemaphoreTake(s_latest_mutex, portMAX_DELAY) == pdTRUE) {
+        s_latest.valid = false;
         s_latest.last_error = err;
         xSemaphoreGive(s_latest_mutex);
     }
 }
 
-void sensor_latest_store_for_test(const sensor_latest_reading_t *reading)
+void sensor_latest_store(const sensor_latest_reading_t *reading)
 {
     if (sensor_latest_mutex_ensure() != ESP_OK) {
         return;
@@ -76,6 +77,16 @@ void sensor_latest_store_for_test(const sensor_latest_reading_t *reading)
         }
         xSemaphoreGive(s_latest_mutex);
     }
+}
+
+void sensor_latest_store_for_test(const sensor_latest_reading_t *reading)
+{
+    sensor_latest_store(reading);
+}
+
+void sensor_latest_store_error_for_test(esp_err_t err)
+{
+    sensor_latest_store_error(err);
 }
 
 esp_err_t sensor_latest_get(sensor_latest_reading_t *out)
@@ -121,7 +132,7 @@ static void sensor_task_run(void *arg)
                 .measured_at_ms = esp_timer_get_time() / 1000,
                 .last_error = ESP_OK,
             };
-            sensor_latest_store_for_test(&latest);
+            sensor_latest_store(&latest);
         } else {
             sensor_latest_store_error(err);
             ESP_LOGW(TAG, "sht31 read failed: %s", esp_err_to_name(err));

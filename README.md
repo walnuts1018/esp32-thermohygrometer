@@ -93,7 +93,9 @@ devcontainer exec --workspace-folder . bash -c ". /opt/esp/idf/export.sh && idf.
 
 ESP-IDF provisioning 対応クライアントから上記の値を指定し、接続したい Wi-Fi の SSID とパスワードを送信してください。成功すると ESP32 は STA モードで Wi-Fi に接続します。
 
-デバイスの IP アドレスは、シリアルモニターのログ、またはルーターの DHCP クライアント一覧で確認します。
+provisioning が成功すると、ファームウェアは Wi-Fi 情報と認証設定を NVS に保存して再起動します。再起動後、保存済み Wi-Fi へ自動接続します。
+
+デバイスの IP アドレスは、再起動後のシリアルモニターのログ、またはルーターの DHCP クライアント一覧で確認します。
 
 ## 認証設定
 
@@ -105,7 +107,17 @@ ESP-IDF provisioning 対応クライアントから上記の値を指定し、�
 
 `issuer` と `role` には上記のデフォルト値があります。`audience` は環境ごとに異なるため、未設定のままだと保護 API は `503 auth_not_ready` を返します。
 
-現状のファームウェアには `audience` を NVS に保存する内部 API はありますが、利用者向けの設定 UI はまだありません。運用する場合は、製造時 NVS 設定、専用の設定処理、または今後追加する provisioning custom-data 経由で `auth_aud` を保存してください。
+Wi-Fi 情報を送信する前に、provisioning の `custom-data` endpoint へ次の JSON を送ってください。
+
+```json
+{
+  "audience": "thermo-api",
+  "issuer": "https://auth.walnuts.dev",
+  "role": "thermohygrometer.read"
+}
+```
+
+`issuer` と `role` は省略できます。`audience` は必須です。custom-data は ESP-IDF provisioning の Wi-Fi credentials 送信より前に送る必要があります。
 
 ## API の使い方
 

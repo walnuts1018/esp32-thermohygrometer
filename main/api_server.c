@@ -14,6 +14,8 @@
 #include "sensor_sht31.h"
 #include "sensor_task.h"
 
+#define API_AUTH_HEADER_MAX 4096
+
 static httpd_handle_t s_server;
 static bool s_server_starting;
 static portMUX_TYPE s_server_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -60,7 +62,7 @@ static esp_err_t healthz_handler(httpd_req_t *req)
 
 static esp_err_t latest_handler(httpd_req_t *req)
 {
-    char auth_header[1024] = {0};
+    char auth_header[API_AUTH_HEADER_MAX] = {0};
     esp_err_t hdr_err = httpd_req_get_hdr_value_str(req, "Authorization", auth_header,
                                                     sizeof(auth_header));
     auth_result_t auth =

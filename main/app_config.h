@@ -3,11 +3,11 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
-/* Wi-Fi lengths are max payload bytes and exclude the terminating NUL. */
+/* Wi-Fi の長さは NUL 終端を含まない最大 payload byte 数。 */
 #define APP_CONFIG_MAX_SSID_LEN 32
 #define APP_CONFIG_MAX_PASSWORD_LEN 64
 
-/* Auth lengths are struct buffer sizes and include the terminating NUL. */
+/* 認証設定の長さは NUL 終端を含む struct buffer size。 */
 #define APP_CONFIG_MAX_URL_LEN 128
 #define APP_CONFIG_MAX_AUDIENCE_LEN 96
 #define APP_CONFIG_MAX_ROLE_LEN 64

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <time.h>
 
+#include "app_status.h"
 #include "unity.h"
 
 static void set_test_auth_config(void)
@@ -13,6 +14,7 @@ static void set_test_auth_config(void)
         .role = "thermohygrometer.read",
     };
     auth_oidc_set_config_for_test(&config);
+    app_status_set_time_synced(true);
 }
 
 static void build_claims(char *buffer,
@@ -99,7 +101,6 @@ TEST_CASE("expired token is invalid", "[auth]")
 {
     set_test_auth_config();
 
-    /* Build a claims JSON with exp in the past. */
     time_t past = time(NULL) - 3600;
     char claims[768];
     int len = snprintf(claims, sizeof(claims),
@@ -113,4 +114,17 @@ TEST_CASE("expired token is invalid", "[auth]")
     TEST_ASSERT_LESS_THAN((int)sizeof(claims), len);
 
     TEST_ASSERT_EQUAL(AUTH_RESULT_INVALID, auth_oidc_validate_claims_json(claims));
+}
+
+TEST_CASE("claims are not accepted before time is synchronized", "[auth]")
+{
+    set_test_auth_config();
+    app_status_set_time_synced(false);
+
+    char claims[768];
+    build_claims(claims, sizeof(claims), "https://auth.walnuts.dev", "[\"thermo-api\"]",
+                 "\"urn:zitadel:iam:org:project:123456:roles\":{"
+                 "\"thermohygrometer.read\":{}}");
+
+    TEST_ASSERT_EQUAL(AUTH_RESULT_NOT_READY, auth_oidc_validate_claims_json(claims));
 }
