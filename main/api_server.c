@@ -1,6 +1,7 @@
 #include "api_server.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <stdio.h>
 
 #include "auth_oidc.h"
@@ -14,7 +15,7 @@
 #include "sensor_sht31.h"
 #include "sensor_task.h"
 
-#define API_AUTH_HEADER_MAX 4096
+#define API_AUTH_HEADER_MAX CONFIG_HTTPD_MAX_REQ_HDR_LEN
 
 static httpd_handle_t s_server;
 static bool s_server_starting;
@@ -62,11 +63,21 @@ static esp_err_t healthz_handler(httpd_req_t *req)
 
 static esp_err_t latest_handler(httpd_req_t *req)
 {
-    char auth_header[API_AUTH_HEADER_MAX] = {0};
-    esp_err_t hdr_err = httpd_req_get_hdr_value_str(req, "Authorization", auth_header,
-                                                    sizeof(auth_header));
+    char *auth_header = NULL;
+    size_t auth_header_len = httpd_req_get_hdr_value_len(req, "Authorization");
+    esp_err_t hdr_err = ESP_ERR_NOT_FOUND;
+    if (auth_header_len > 0 && auth_header_len < API_AUTH_HEADER_MAX) {
+        auth_header = calloc(1, auth_header_len + 1);
+        if (auth_header == NULL) {
+            return json_send_error(req, 500, "internal_error", "out of memory");
+        }
+        hdr_err = httpd_req_get_hdr_value_str(req, "Authorization", auth_header,
+                                              auth_header_len + 1);
+    }
+
     auth_result_t auth =
         auth_oidc_validate_authorization_header(hdr_err == ESP_OK ? auth_header : NULL);
+    free(auth_header);
     if (auth == AUTH_RESULT_MISSING || auth == AUTH_RESULT_INVALID) {
         return json_send_error(req, 401, "unauthorized", "missing or invalid bearer token");
     }

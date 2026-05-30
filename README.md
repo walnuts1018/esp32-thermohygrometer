@@ -163,7 +163,7 @@ python managed_components/espressif__network_provisioning/tool/esp_prov/esp_prov
   --service_name 192.168.4.1:80 \
   --sec_ver 1 \
   --pop thermohygrometer \
-  --custom_data '{"audience":"thermo-api","issuer":"https://auth.walnuts.dev","role":"thermohygrometer.read"}' \
+  --custom_data '{"audience":"YOUR_ZITADEL_PROJECT_ID","issuer":"https://auth.walnuts.dev","role":"thermohygrometer.read"}' \
   --ssid 'YOUR_WIFI_SSID' \
   --passphrase 'YOUR_WIFI_PASSWORD'
 ```
@@ -188,19 +188,95 @@ curl http://DEVICE_IP/healthz
 - audience: デバイスに保存した API audience
 - role: `thermohygrometer.read`
 
-`issuer` と `role` には上記のデフォルト値があります。`audience` は環境ごとに異なるため、未設定のままだと保護 API は `503 auth_not_ready` を返します。
+`issuer` と `role` には上記のデフォルト値があります。`audience` は環境ごとに異なるため、未設定のままだと保護 API は `503 auth_not_ready` を返します。ZITADEL を使う場合、この `audience` には通常 ZITADEL の Project ID を指定します。
 
 Wi-Fi 情報を送信する前に、provisioning の `custom-data` endpoint へ次の JSON を送ってください。
 
 ```json
 {
-  "audience": "thermo-api",
+  "audience": "YOUR_ZITADEL_PROJECT_ID",
   "issuer": "https://auth.walnuts.dev",
   "role": "thermohygrometer.read"
 }
 ```
 
 `issuer` と `role` は省略できます。`audience` は必須です。custom-data は ESP-IDF provisioning の Wi-Fi credentials 送信より前に送る必要があります。
+
+### ZITADEL の設定
+
+この API はシステムから呼び出す想定なので、ZITADEL ではブラウザログイン用ユーザーではなく Service Account を使います。
+
+1. ZITADEL Console で Project を作成します。
+2. 作成した Project に role key `thermohygrometer.read` を追加します。
+3. Service Account を作成します。
+4. Service Account の Actions から client secret を生成し、表示された `ClientID` と `ClientSecret` を控えます。`ClientSecret` は再表示できないため、失った場合は再生成してください。
+5. Service Account の general settings で Access Token Type を `JWT` に変更します。このファームウェアは introspection を使わず、ZITADEL の JWKS で JWT をローカル検証します。
+6. Service Account に Project の `thermohygrometer.read` role を割り当てます。
+7. Project ID を控えます。この値を provisioning の `audience`、Go サンプルの `OIDC_AUDIENCE`、および `OIDC_SCOPES` の audience scope に使います。
+
+Access Token を取得するときは、少なくとも次の scope を指定します。
+
+```text
+openid urn:zitadel:iam:org:project:id:YOUR_ZITADEL_PROJECT_ID:aud urn:zitadel:iam:org:project:role:thermohygrometer.read
+```
+
+- `openid` は ZITADEL の token request に必要です。
+- `urn:zitadel:iam:org:project:id:YOUR_ZITADEL_PROJECT_ID:aud` は access token の `aud` に Project ID を含めるために使います。
+- `urn:zitadel:iam:org:project:role:thermohygrometer.read` は role claim を token に含めるために使います。
+
+関連する ZITADEL 公式ドキュメント:
+
+- [OAuth Client Credentials for Service Accounts](https://zitadel.com/docs/guides/integrate/service-accounts/client-credentials)
+- [Retrieve User Roles in ZITADEL](https://zitadel.com/docs/guides/integrate/retrieve-user-roles)
+- [Scopes in ZITADEL](https://zitadel.com/docs/apis/openidoauth/scopes)
+
+### 再 provisioning する
+
+すでに provisioning 済みの ESP32 で Wi-Fi 情報や ZITADEL の audience を入れ直す場合は、NVS を消去してからファームウェアを書き直すのが確実です。Dev Container から USB シリアルが見えない場合があるため、この操作はホスト側で実行します。
+
+```sh
+ESPPORT=/dev/cu.usbserial-2110
+
+esptool --chip esp32 -p "$ESPPORT" erase-flash
+
+cd build
+esptool --chip esp32 -p "$ESPPORT" -b 460800 write-flash @flash_args
+cd ..
+```
+
+起動後、シリアルログに次のようなログが出れば provisioning モードです。
+
+```text
+Wi-Fi credentials missing, starting provisioning
+starting Wi-Fi provisioning service thermohygrometer-setup
+```
+
+その後、PC の Wi-Fi 接続先を `thermohygrometer-setup` に切り替え、再度 `esp_prov.py` を実行します。
+
+```sh
+devcontainer exec --workspace-folder . bash
+```
+
+Dev Container 内で次を実行します。
+
+```sh
+. /opt/esp/idf/export.sh
+
+python managed_components/espressif__network_provisioning/tool/esp_prov/esp_prov.py \
+  --transport softap \
+  --service_name 192.168.4.1:80 \
+  --sec_ver 1 \
+  --pop thermohygrometer \
+  --custom_data '{"audience":"YOUR_ZITADEL_PROJECT_ID","issuer":"https://auth.walnuts.dev","role":"thermohygrometer.read"}' \
+  --ssid 'YOUR_WIFI_SSID' \
+  --passphrase 'YOUR_WIFI_PASSWORD'
+```
+
+成功後に再起動し、ログで次を確認します。
+
+```text
+config loaded: wifi=set auth_audience=set
+```
 
 ## API の使い方
 
@@ -252,6 +328,7 @@ curl -H "Authorization: Bearer $ACCESS_TOKEN" \
 ### Go から Access Token を取得して呼び出す
 
 `example/main.go` に、OAuth2 client credentials grant で Access Token を取得して `/v1/measurements/latest` を呼び出す最小サンプルがあります。ブラウザログインは使わず、システム間連携用の client ID / client secret を使います。
+Go 1.26 以降を使って実行してください。
 
 ```sh
 cd example
@@ -260,13 +337,13 @@ export DEVICE_URL="http://DEVICE_IP"
 export OIDC_TOKEN_URL="https://auth.walnuts.dev/oauth/v2/token"
 export OIDC_CLIENT_ID="YOUR_CLIENT_ID"
 export OIDC_CLIENT_SECRET="YOUR_CLIENT_SECRET"
-export OIDC_AUDIENCE="thermo-api"
-export OIDC_SCOPES="openid"
+export OIDC_AUDIENCE="YOUR_ZITADEL_PROJECT_ID"
+export OIDC_SCOPES="openid urn:zitadel:iam:org:project:id:YOUR_ZITADEL_PROJECT_ID:aud urn:zitadel:iam:org:project:role:thermohygrometer.read"
 
 go run .
 ```
 
-`OIDC_AUDIENCE` は provisioning でデバイスに保存した `audience` と同じ値を指定します。IdP 側で audience を scope で指定する構成の場合は、`OIDC_AUDIENCE` を空にして `OIDC_SCOPES` に必要な scope を追加してください。
+`OIDC_AUDIENCE` は provisioning でデバイスに保存した `audience` と同じ値を指定します。ZITADEL では audience scope も必要なため、`OIDC_SCOPES` に `urn:zitadel:iam:org:project:id:YOUR_ZITADEL_PROJECT_ID:aud` を含めてください。
 
 ### 認証エラーを確認する
 

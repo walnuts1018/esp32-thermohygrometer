@@ -46,7 +46,12 @@ func main() {
 	}
 
 	client := config.Client(ctx)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, deviceURL+"/v1/measurements/latest", nil)
+	measureURL, err := url.JoinPath(deviceURL, "/v1/measurements/latest")
+	if err != nil {
+		slog.Error("failed to join URL", "error", err)
+		os.Exit(1)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, measureURL, nil)
 	if err != nil {
 		slog.Error("failed to create request", "error", err)
 		os.Exit(1)
