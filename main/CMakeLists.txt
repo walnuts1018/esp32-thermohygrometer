@@ -15,13 +15,13 @@ idf_component_register(
         esp_wifi
         esp_event
         esp_netif
-        wifi_provisioning
+        espressif__network_provisioning
         protocomm
         esp_http_server
         esp_http_client
         esp-tls
         esp_timer
         mbedtls
-        json
+        espressif__cjson
         driver
 )

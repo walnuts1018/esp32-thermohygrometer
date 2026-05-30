@@ -14,8 +14,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include "wifi_provisioning/manager.h"
-#include "wifi_provisioning/scheme_softap.h"
+#include "network_provisioning/manager.h"
+#include "network_provisioning/scheme_softap.h"
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
@@ -285,11 +285,11 @@ static esp_err_t wifi_manager_start_provisioning(void)
         }
     }
 
-    wifi_prov_mgr_config_t prov_config = {
-        .scheme = wifi_prov_scheme_softap,
-        .scheme_event_handler = WIFI_PROV_EVENT_HANDLER_NONE,
+    network_prov_mgr_config_t prov_config = {
+        .scheme = network_prov_scheme_softap,
+        .scheme_event_handler = NETWORK_PROV_EVENT_HANDLER_NONE,
     };
-    ESP_RETURN_ON_ERROR(wifi_prov_mgr_init(prov_config), TAG, "provisioning manager init failed");
+    ESP_RETURN_ON_ERROR(network_prov_mgr_init(prov_config), TAG, "provisioning manager init failed");
 
     const char *service_name = "thermohygrometer-setup";
     const char *pop = "thermohygrometer";
@@ -297,7 +297,7 @@ static esp_err_t wifi_manager_start_provisioning(void)
     app_status_set_wifi_connected(false);
     app_status_set_time_synced(false);
     ESP_LOGI(TAG, "starting Wi-Fi provisioning service %s", service_name);
-    ESP_RETURN_ON_ERROR(wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1,
+    ESP_RETURN_ON_ERROR(network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1,
                                                          pop,
                                                          service_name,
                                                          NULL),

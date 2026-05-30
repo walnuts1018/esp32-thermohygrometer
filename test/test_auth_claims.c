@@ -82,3 +82,35 @@ TEST_CASE("claims with wrong audience are forbidden", "[auth]")
 
     TEST_ASSERT_EQUAL(AUTH_RESULT_FORBIDDEN, auth_oidc_validate_claims_json(claims));
 }
+
+TEST_CASE("claims with global ZITADEL role claim are accepted", "[auth]")
+{
+    set_test_auth_config();
+
+    char claims[768];
+    build_claims(claims, sizeof(claims), "https://auth.walnuts.dev", "[\"thermo-api\"]",
+                 "\"urn:zitadel:iam:org:project:roles\":{"
+                 "\"thermohygrometer.read\":{\"orgid123\":\"example.org\"}}");
+
+    TEST_ASSERT_EQUAL(AUTH_RESULT_OK, auth_oidc_validate_claims_json(claims));
+}
+
+TEST_CASE("expired token is invalid", "[auth]")
+{
+    set_test_auth_config();
+
+    /* Build a claims JSON with exp in the past. */
+    time_t past = time(NULL) - 3600;
+    char claims[768];
+    int len = snprintf(claims, sizeof(claims),
+                       "{\"iss\":\"https://auth.walnuts.dev\","
+                       "\"aud\":[\"thermo-api\"],"
+                       "\"exp\":%lld,"
+                       "\"urn:zitadel:iam:org:project:123456:roles\":"
+                       "{\"thermohygrometer.read\":{}}}",
+                       (long long)past);
+    TEST_ASSERT_GREATER_THAN(0, len);
+    TEST_ASSERT_LESS_THAN((int)sizeof(claims), len);
+
+    TEST_ASSERT_EQUAL(AUTH_RESULT_INVALID, auth_oidc_validate_claims_json(claims));
+}

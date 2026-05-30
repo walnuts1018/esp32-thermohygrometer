@@ -19,6 +19,6 @@ idf_component_register(
         esp_http_client
         esp-tls
         mbedtls
-        json
+        espressif__cjson
         nvs_flash
 )

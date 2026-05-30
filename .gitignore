@@ -1,0 +1,13 @@
+# ESP-IDF specific
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+
+# OS specific
+.DS_Store
+
+# IDE specific
+.vscode/
+.antigravitycli/

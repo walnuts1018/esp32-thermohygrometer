@@ -17,7 +17,7 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 #include "mbedtls/pk.h"
-#include "mbedtls/rsa.h"
+#include "psa/crypto.h"
 
 #define AUTH_TASK_STACK_SIZE 12288
 #define AUTH_TASK_PRIORITY 5
@@ -212,8 +212,13 @@ static bool json_string_array_contains(const cJSON *item, const char *expected)
 
 static bool roles_claim_contains(const cJSON *root, const char *role)
 {
+    /* ZITADEL emits role claims in two forms:
+     *   project-specific: urn:zitadel:iam:org:project:{projectId}:roles
+     *   global:           urn:zitadel:iam:org:project:roles
+     * Both forms are objects whose keys are role names. */
     static const char roles_prefix[] = "urn:zitadel:iam:org:project:";
     static const char roles_suffix[] = ":roles";
+    static const char global_roles[] = "urn:zitadel:iam:org:project:roles";
 
     if (!cJSON_IsObject(root) || role == NULL || role[0] == '\0') {
         return false;
@@ -223,14 +228,26 @@ static bool roles_claim_contains(const cJSON *root, const char *role)
     cJSON_ArrayForEach(claim, root)
     {
         const char *claim_name = claim->string;
-        if (claim_name == NULL || strncmp(claim_name, roles_prefix, strlen(roles_prefix)) != 0) {
+        if (claim_name == NULL) {
             continue;
         }
 
-        size_t claim_name_len = strlen(claim_name);
-        size_t suffix_len = strlen(roles_suffix);
-        if (claim_name_len <= suffix_len ||
-            strcmp(claim_name + claim_name_len - suffix_len, roles_suffix) != 0) {
+        /* Check global form first (exact match). */
+        bool is_global = strcmp(claim_name, global_roles) == 0;
+
+        /* Check project-specific form: prefix match + suffix ":roles",
+         * but exclude the global form (which has no project ID segment). */
+        bool is_project_specific = false;
+        if (!is_global && strncmp(claim_name, roles_prefix, strlen(roles_prefix)) == 0) {
+            size_t claim_name_len = strlen(claim_name);
+            size_t suffix_len = strlen(roles_suffix);
+            if (claim_name_len > strlen(roles_prefix) + suffix_len &&
+                strcmp(claim_name + claim_name_len - suffix_len, roles_suffix) == 0) {
+                is_project_specific = true;
+            }
+        }
+
+        if (!is_global && !is_project_specific) {
             continue;
         }
 
@@ -424,6 +441,139 @@ static const cJSON *find_jwk_by_kid(const cJSON *jwks, const char *kid)
     return NULL;
 }
 
+/* Write a DER-encoded ASN.1 TLV into a buffer that grows leftward.
+ * Returns the updated write pointer, or NULL on overflow. */
+static unsigned char *asn1_write_len_left(unsigned char *p, const unsigned char *start, size_t len)
+{
+    if (len < 0x80) {
+        if (p - start < 1) {
+            return NULL;
+        }
+        *--p = (unsigned char)len;
+    } else if (len <= 0xff) {
+        if (p - start < 2) {
+            return NULL;
+        }
+        *--p = (unsigned char)len;
+        *--p = 0x81;
+    } else if (len <= 0xffff) {
+        if (p - start < 3) {
+            return NULL;
+        }
+        *--p = (unsigned char)(len & 0xff);
+        *--p = (unsigned char)(len >> 8);
+        *--p = 0x82;
+    } else {
+        return NULL;
+    }
+    return p;
+}
+
+static unsigned char *asn1_write_tag_left(unsigned char *p, const unsigned char *start, unsigned char tag)
+{
+    if (p - start < 1) {
+        return NULL;
+    }
+    *--p = tag;
+    return p;
+}
+
+static unsigned char *asn1_write_integer_left(unsigned char *p, const unsigned char *start,
+                                              const unsigned char *val, size_t val_len)
+{
+    /* Prepend value bytes */
+    if (p - start < (ptrdiff_t)val_len) {
+        return NULL;
+    }
+    p -= val_len;
+    memcpy(p, val, val_len);
+
+    /* Prepend leading zero byte if high bit is set */
+    if (val_len > 0 && (val[0] & 0x80)) {
+        if (p - start < 1) {
+            return NULL;
+        }
+        *--p = 0x00;
+        val_len++;
+    }
+
+    p = asn1_write_len_left(p, start, val_len);
+    if (p == NULL) {
+        return NULL;
+    }
+    return asn1_write_tag_left(p, start, 0x02); /* INTEGER */
+}
+
+/* Build SubjectPublicKeyInfo DER for an RSA key:
+ *   SEQUENCE {
+ *     SEQUENCE { OID rsaEncryption, NULL }
+ *     BIT STRING { SEQUENCE { INTEGER n, INTEGER e } }
+ *   }
+ * Returns number of bytes written into der_out (written at the END of der_out),
+ * or 0 on failure.
+ */
+static size_t build_rsa_spki_der(const unsigned char *n, size_t n_len,
+                                 const unsigned char *e, size_t e_len,
+                                 unsigned char *der_out, size_t der_out_len)
+{
+    /* RSA OID: 1.2.840.113549.1.1.1 */
+    static const unsigned char rsa_oid[] = {
+        0x06, 0x09, /* OID, 9 bytes */
+        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+        0x05, 0x00  /* NULL */
+    };
+
+    unsigned char *p = der_out + der_out_len;
+    const unsigned char *start = der_out;
+
+    /* RSAPublicKey = SEQUENCE { INTEGER n, INTEGER e } */
+    unsigned char *rsa_pub_end = p;
+
+    p = asn1_write_integer_left(p, start, e, e_len);
+    if (p == NULL) return 0;
+    p = asn1_write_integer_left(p, start, n, n_len);
+    if (p == NULL) return 0;
+
+    size_t rsa_pub_len = (size_t)(rsa_pub_end - p);
+    p = asn1_write_len_left(p, start, rsa_pub_len);
+    if (p == NULL) return 0;
+    p = asn1_write_tag_left(p, start, 0x30); /* SEQUENCE */
+    if (p == NULL) return 0;
+
+    size_t seq_inner_len = (size_t)(rsa_pub_end - p);
+
+    /* BIT STRING wrapping: tag=0x03, length=(seq_inner_len+1), content_byte=0x00 + data */
+    if (p - start < 1) return 0;
+    *--p = 0x00; /* no unused bits */
+    size_t bit_str_content_len = seq_inner_len + 1;
+    p = asn1_write_len_left(p, start, bit_str_content_len);
+    if (p == NULL) return 0;
+    p = asn1_write_tag_left(p, start, 0x03); /* BIT STRING */
+    if (p == NULL) return 0;
+
+    /* AlgorithmIdentifier = SEQUENCE { OID rsaEncryption, NULL } */
+    size_t oid_len = sizeof(rsa_oid);
+    if (p - start < (ptrdiff_t)oid_len) return 0;
+    p -= oid_len;
+    memcpy(p, rsa_oid, oid_len);
+    p = asn1_write_len_left(p, start, oid_len);
+    if (p == NULL) return 0;
+    p = asn1_write_tag_left(p, start, 0x30); /* SEQUENCE (AlgorithmIdentifier) */
+    if (p == NULL) return 0;
+
+    /* Outer SEQUENCE */
+    size_t outer_content_len = (size_t)((der_out + der_out_len) - p);
+    p = asn1_write_len_left(p, start, outer_content_len);
+    if (p == NULL) return 0;
+    p = asn1_write_tag_left(p, start, 0x30); /* SEQUENCE */
+    if (p == NULL) return 0;
+
+    size_t total = (size_t)((der_out + der_out_len) - p);
+    /* Move to front */
+    memmove(der_out, p, total);
+    return total;
+}
+
 static auth_result_t verify_rs256_with_jwk(const char *signing_input,
                                            const unsigned char *signature,
                                            size_t signature_len,
@@ -444,45 +594,64 @@ static auth_result_t verify_rs256_with_jwk(const char *signing_input,
     unsigned char *e_bytes = NULL;
     size_t n_len = 0;
     size_t e_len = 0;
+    auth_result_t result = AUTH_RESULT_INVALID;
+
     if (!base64url_decode_alloc(modulus->valuestring, &n_bytes, &n_len) ||
         !base64url_decode_alloc(exponent->valuestring, &e_bytes, &e_len) ||
         n_len == 0 || e_len == 0) {
-        free(n_bytes);
-        free(e_bytes);
-        return AUTH_RESULT_INVALID;
+        goto cleanup_ne;
     }
 
+    /* Compute SHA-256 of signing_input using mbedtls_md */
     unsigned char digest[32];
     const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     if (md_info == NULL ||
         mbedtls_md(md_info, (const unsigned char *)signing_input, strlen(signing_input), digest) != 0) {
-        free(n_bytes);
-        free(e_bytes);
-        return AUTH_RESULT_INVALID;
+        goto cleanup_ne;
     }
 
-    mbedtls_pk_context pk;
-    mbedtls_pk_init(&pk);
-
-    int ret = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
-    if (ret == 0) {
-        mbedtls_rsa_context *rsa = mbedtls_pk_rsa(pk);
-        mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_SHA256);
-        ret = mbedtls_rsa_import_raw(rsa, n_bytes, n_len, NULL, 0, NULL, 0, NULL, 0, e_bytes, e_len);
-        if (ret == 0) {
-            ret = mbedtls_rsa_complete(rsa);
-        }
-        if (ret == 0) {
-            ret = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, digest, sizeof(digest),
-                                    signature, signature_len);
-        }
+    /* Build SubjectPublicKeyInfo DER from n and e */
+    /* Maximum DER size: 4 (outer seq) + 2 (alg seq) + 13 (OID+NULL) +
+     *                   4 (bitstring hdr) + 4 (inner seq) +
+     *                   (4+n_len+1) + (4+e_len+1)  */
+    size_t der_buf_size = 32 + n_len + e_len;
+    unsigned char *der_buf = malloc(der_buf_size);
+    if (der_buf == NULL) {
+        goto cleanup_ne;
     }
 
-    mbedtls_pk_free(&pk);
+    size_t der_len = build_rsa_spki_der(n_bytes, n_len, e_bytes, e_len, der_buf, der_buf_size);
+    if (der_len == 0) {
+        free(der_buf);
+        goto cleanup_ne;
+    }
+
+    /* Import key using PSA Crypto */
+    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_VERIFY_HASH);
+    psa_set_key_algorithm(&attrs, PSA_ALG_RSA_PKCS1V15_SIGN(PSA_ALG_SHA_256));
+    psa_set_key_type(&attrs, PSA_KEY_TYPE_RSA_PUBLIC_KEY);
+
+    psa_key_id_t key_id = PSA_KEY_ID_NULL;
+    psa_status_t psa_status = psa_import_key(&attrs, der_buf, der_len, &key_id);
+    free(der_buf);
+
+    if (psa_status != PSA_SUCCESS) {
+        goto cleanup_ne;
+    }
+
+    psa_status = psa_verify_hash(key_id,
+                                 PSA_ALG_RSA_PKCS1V15_SIGN(PSA_ALG_SHA_256),
+                                 digest, sizeof(digest),
+                                 signature, signature_len);
+    psa_destroy_key(key_id);
+
+    result = (psa_status == PSA_SUCCESS) ? AUTH_RESULT_OK : AUTH_RESULT_INVALID;
+
+cleanup_ne:
     free(n_bytes);
     free(e_bytes);
-
-    return ret == 0 ? AUTH_RESULT_OK : AUTH_RESULT_INVALID;
+    return result;
 }
 
 static auth_result_t verify_jwt_signature_and_claims(const char *jwt)

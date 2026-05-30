@@ -1,0 +1,20 @@
+{
+    "name": "ESP-IDF DevContainer",
+    "image": "espressif/idf:latest",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "espressif.esp-idf-extension",
+                "ms-vscode.cpptools"
+            ],
+            "settings": {
+                "idf.espIdfPath": "/opt/esp/idf",
+                "idf.customExtraPaths": "/opt/esp/tools",
+                "idf.pythonBinPath": "/opt/esp/python_env/idf5.4_py3.11_env/bin/python",
+                "idf.toolsPath": "/opt/esp",
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+    "postCreateCommand": "idf.py build"
+}
