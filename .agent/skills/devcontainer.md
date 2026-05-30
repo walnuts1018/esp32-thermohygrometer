@@ -1,6 +1,6 @@
-# AI Agent DevContainer Guide
+# Skill: Use DevContainer for Build and Testing
 
-このガイドは、AIエージェント（Antigravity等）が `esp32-thermohygrometer` リポジトリで開発およびテストを行うための手順とルールを定義しています。
+このスキルは、AIエージェントが当リポジトリのビルドおよびテストを行う際の手順とルールを定義しています。
 
 ## 基本ルール
 

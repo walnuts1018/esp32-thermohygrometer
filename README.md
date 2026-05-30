@@ -8,11 +8,6 @@ ESP-IDF firmware for an ESP32-connected SHT31 thermohygrometer.
 
 ホスト環境（またはAIエージェントの実行環境）には、[Dev Container CLI](https://code.visualstudio.com/docs/devcontainers/devcontainer-cli) がインストールされている必要があります。
 
-```sh
-# npm を使用して Dev Container CLI をインストール
-npm install -g @devcontainers/cli
-```
-
 ## Build
 
 Dev Container を使用してビルドを行う例です。
